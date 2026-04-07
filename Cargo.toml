@@ -1,0 +1,50 @@
+[package]
+name = "regenda"
+version = "0.1.0"
+edition = "2021"
+description = "CalDAV calendar app for reMarkable Paper Pro"
+
+[[bin]]
+name = "regenda"
+path = "src/bin/regenda/main.rs"
+
+[dependencies]
+# QTFB display + low-level I/O
+libc = "0.2"
+cgmath = "0.18"
+image = "0.24"
+fontdue = "0.9"
+
+# HTTP client for CalDAV (rustls for static musl builds, blocking for simplicity)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+
+# XML parsing for CalDAV PROPFIND/REPORT responses
+quick-xml = "0.37"
+
+# iCalendar parsing
+ical = "0.11"
+
+# Config file
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Date/time + timezone
+chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Error handling
+anyhow = "1"
+thiserror = "2.0"
+
+# Scene dispatch
+downcast-rs = "2.0"
+lazy_static = "1.5"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

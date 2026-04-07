@@ -1,0 +1,8 @@
+{
+    "name": "reGenda",
+    "application": "./regenda",
+    "qtfb": true,
+    "disablesWindowedMode": false,
+    "supportsVirtualKeyboard": false,
+    "aspectRatio": "auto"
+}
