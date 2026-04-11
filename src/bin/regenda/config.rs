@@ -27,6 +27,9 @@ pub struct ServerConfig {
     pub client_secret: Option<String>,
     /// Google calendar ID(s) to fetch. Defaults to "primary" (user's main calendar).
     pub calendar_id: Option<Vec<String>>,
+    /// Friendly display names for calendars. Maps calendar ID (or substring) to alias.
+    /// e.g. { "primary": "Personal", "437e8c9": "J" }
+    pub display_name: Option<HashMap<String, String>>,
 }
 
 fn default_type() -> String {
@@ -36,6 +39,22 @@ fn default_type() -> String {
 impl ServerConfig {
     pub fn is_google(&self) -> bool {
         self.r#type == "google"
+    }
+
+    /// Resolve a display name for a calendar ID. Matches exact or substring.
+    pub fn resolve_display_name(&self, calendar_id: &str) -> Option<String> {
+        let names = self.display_name.as_ref()?;
+        // Try exact match first
+        if let Some(name) = names.get(calendar_id) {
+            return Some(name.clone());
+        }
+        // Try substring match (e.g. "437e8c9" matches the full hash)
+        for (key, name) in names {
+            if calendar_id.contains(key.as_str()) || key.contains(calendar_id) {
+                return Some(name.clone());
+            }
+        }
+        None
     }
 }
 

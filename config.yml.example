@@ -17,6 +17,10 @@ sources:
     calendar_id:
       - "primary"
     #  - "family123@group.calendar.google.com"
+    # display_name: Friendly aliases for calendars (matches by substring)
+    #display_name:
+    #  "primary": "Personal"
+    #  "family123": "Family"
 
   # === Standard CalDAV server (Basic auth) ===
   #Personal:

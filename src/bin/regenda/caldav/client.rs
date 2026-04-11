@@ -1,8 +1,9 @@
 use super::google_oauth;
 use super::ical;
 use super::parser;
-use super::types::{CalendarInfo, Event, FetchStatus};
-use crate::config::Config;
+use super::types::{parse_hex_color, CalendarInfo, Event, FetchStatus};
+use crate::canvas::color;
+use crate::config::{Config, ServerConfig};
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, NaiveDate, Utc};
 
@@ -51,7 +52,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
                         .clone()
                         .unwrap_or_else(|| vec!["primary".to_string()]);
 
-                    match fetch_google(server_name, &access_token, &calendar_ids) {
+                    match fetch_google(server_name, &access_token, &calendar_ids, server_config) {
                         Ok((cals, evts)) => {
                             log::info!(
                                 "Google {}: fetched {} calendars, {} events",
@@ -122,13 +123,19 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
 
 /// Fetch events from Google CalDAV using OAuth bearer token.
 /// Google CalDAV endpoint: https://apidata.googleusercontent.com/caldav/v2/{calendarId}/events
+///
+/// Google's CalDAV has quirks:
+/// - REPORT (calendar-query) returns 403 Forbidden — not supported
+/// - "primary" alias doesn't work as a CalDAV calendar ID — need real email
+/// - PROPFIND with Depth:1 + calendar-data on /events/ is the working method
 fn fetch_google(
     server_name: &str,
     access_token: &str,
     calendar_ids: &[String],
+    server_config: &ServerConfig,
 ) -> Result<(Vec<CalendarInfo>, Vec<Event>)> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(60))
         .build()
         .context("Failed to build HTTP client")?;
 
@@ -136,10 +143,42 @@ fn fetch_google(
         token: access_token.to_string(),
     };
 
+    // If "primary" is in the list, discover actual calendar IDs first
+    // Store (cal_id, discovered_color) pairs
+    use std::collections::HashMap;
+    let mut discovered_colors: HashMap<String, Option<String>> = HashMap::new();
+
+    let resolved_ids = if calendar_ids.iter().any(|id| id == "primary") {
+        log::info!("Google: 'primary' specified, discovering actual calendar IDs...");
+        match discover_google_calendars(&client, &auth) {
+            Ok(discovered) => {
+                log::info!("Google: discovered {} calendars", discovered.len());
+                let mut ids: Vec<String> = calendar_ids
+                    .iter()
+                    .filter(|id| *id != "primary")
+                    .cloned()
+                    .collect();
+                for (cal_id, _name, color_hex) in &discovered {
+                    discovered_colors.insert(cal_id.clone(), color_hex.clone());
+                    if !ids.contains(cal_id) {
+                        ids.push(cal_id.clone());
+                    }
+                }
+                ids
+            }
+            Err(e) => {
+                log::warn!("Google: calendar discovery failed: {:?}. Using configured IDs.", e);
+                calendar_ids.to_vec()
+            }
+        }
+    } else {
+        calendar_ids.to_vec()
+    };
+
     let mut calendars = Vec::new();
     let mut all_events = Vec::new();
 
-    for cal_id in calendar_ids {
+    for cal_id in &resolved_ids {
         // URL-encode the calendar ID (handles email addresses with @)
         let encoded_id = urlencoding::encode(cal_id);
         let cal_base_url = format!("{}/{}/", GOOGLE_CALDAV_BASE, encoded_id);
@@ -147,32 +186,47 @@ fn fetch_google(
 
         log::info!("Google: fetching calendar '{}' at {}", cal_id, cal_events_url);
 
-        // Try PROPFIND to get calendar display name
-        let cal_name = match propfind_displayname(&client, &cal_base_url, &auth) {
-            Ok(Some(name)) => {
-                log::info!("Google: calendar display name = '{}'", name);
-                name
-            }
-            Ok(None) => {
-                log::info!("Google: no display name found, using calendar ID");
-                cal_id.clone()
-            }
-            Err(e) => {
-                log::warn!("Google: PROPFIND for display name failed: {:?}", e);
-                cal_id.clone()
+        // Get calendar color: prefer discovered color, fallback to PROPFIND
+        let (server_display_name, cal_color_str) =
+            if let Some(disc_color) = discovered_colors.get(cal_id) {
+                // We have discovery data — do a quick PROPFIND just for display name
+                let (name, propfind_color) = propfind_calendar_props(&client, &cal_base_url, &auth);
+                // Prefer discovery color (from listing), fall back to PROPFIND color
+                (name, disc_color.clone().or(propfind_color))
+            } else {
+                propfind_calendar_props(&client, &cal_base_url, &auth)
+            };
+
+        let cal_name = if let Some(alias) = server_config.resolve_display_name(cal_id) {
+            log::info!("Google: using config alias '{}' for '{}'", alias, cal_id);
+            alias
+        } else {
+            match server_display_name {
+                Some(name) if !name.trim().is_empty() => {
+                    log::info!("Google: calendar display name = '{}'", name.trim());
+                    name.trim().to_string()
+                }
+                _ => {
+                    log::info!("Google: no display name, using calendar ID");
+                    cal_id.clone()
+                }
             }
         };
+
+        let cal_color = cal_color_str.as_deref().and_then(parse_hex_color);
+        log::info!("Google: calendar '{}' color = {:?}", cal_name, cal_color);
 
         calendars.push(CalendarInfo {
             name: cal_name.clone(),
             path: cal_id.clone(),
-            color: None,
+            color: cal_color_str,
             visible: true,
             server_name: server_name.to_string(),
         });
 
-        // Fetch events — try REPORT first, fall back to PROPFIND listing
-        match fetch_google_events(&client, &cal_events_url, &auth, &cal_name) {
+        // Google CalDAV: PROPFIND with calendar-data is the working method
+        // (REPORT always returns 403)
+        match fetch_google_events_propfind(&client, &cal_events_url, &auth, &cal_name, cal_color) {
             Ok(events) => {
                 log::info!(
                     "Google: fetched {} events from '{}'",
@@ -183,15 +237,14 @@ fn fetch_google(
             }
             Err(e) => {
                 log::warn!(
-                    "Google REPORT failed for '{}': {:?}. Trying PROPFIND fallback.",
+                    "Google PROPFIND failed for '{}': {:?}. Trying GET fallback.",
                     cal_name,
                     e
                 );
-                // Fallback: PROPFIND to list all event resources, then GET each
-                match fetch_google_events_propfind(&client, &cal_events_url, &auth, &cal_name) {
+                match fetch_google_events_get(&client, &cal_events_url, &auth, &cal_name, cal_color) {
                     Ok(events) => {
                         log::info!(
-                            "Google PROPFIND fallback: fetched {} events from '{}'",
+                            "Google GET fallback: fetched {} events from '{}'",
                             events.len(),
                             cal_name
                         );
@@ -199,7 +252,7 @@ fn fetch_google(
                     }
                     Err(e2) => {
                         log::error!(
-                            "Google: both REPORT and PROPFIND failed for '{}': {:?}",
+                            "Google: all methods failed for '{}': {:?}",
                             cal_name,
                             e2
                         );
@@ -212,12 +265,166 @@ fn fetch_google(
     Ok((calendars, all_events))
 }
 
+/// Discover all calendars available to the authenticated Google user.
+/// Does PROPFIND on the CalDAV principal to find calendar-home-set,
+/// then lists calendars there.
+/// Returned tuple: (calendar_id, display_name, color_hex)
+fn discover_google_calendars(
+    client: &reqwest::blocking::Client,
+    auth: &Auth,
+) -> Result<Vec<(String, String, Option<String>)>> {
+    // Step 1: Find the principal
+    let principal_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:current-user-principal/>
+  </d:prop>
+</d:propfind>"#;
+
+    let mut req = client
+        .request(
+            reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+            GOOGLE_CALDAV_BASE,
+        )
+        .header("Depth", "0")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(principal_xml);
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("Google principal discovery failed")?;
+    let body = resp.text()?;
+    log::debug!("Google principal response: {}", &body[..body.len().min(500)]);
+
+    let principal_href = extract_href_from_tag(&body, "current-user-principal");
+    let principal_url = match principal_href {
+        Some(href) => resolve_url(GOOGLE_CALDAV_BASE, &href),
+        None => {
+            log::warn!("Google: no principal found, trying calendar-home-set directly");
+            GOOGLE_CALDAV_BASE.to_string()
+        }
+    };
+
+    log::info!("Google principal URL: {}", principal_url);
+
+    // Step 2: Find calendar-home-set
+    let home_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
+  <d:prop>
+    <c:calendar-home-set/>
+  </d:prop>
+</d:propfind>"#;
+
+    let mut req = client
+        .request(
+            reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+            &principal_url,
+        )
+        .header("Depth", "0")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(home_xml);
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("Google calendar-home-set discovery failed")?;
+    let body = resp.text()?;
+    log::debug!("Google calendar-home-set response: {}", &body[..body.len().min(500)]);
+
+    let home_href = extract_href_from_tag(&body, "calendar-home-set");
+    let home_url = match home_href {
+        Some(href) => resolve_url(&principal_url, &href),
+        None => principal_url.clone(),
+    };
+
+    log::info!("Google calendar home URL: {}", home_url);
+
+    // Step 3: List calendars
+    let list_xml = build_calendar_propfind();
+    let mut req = client
+        .request(
+            reqwest::Method::from_bytes(b"PROPFIND").unwrap(),
+            &home_url,
+        )
+        .header("Depth", "1")
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .body(list_xml);
+    req = apply_auth(req, auth);
+
+    let resp = req.send().context("Google calendar listing failed")?;
+    let status = resp.status();
+    let body = resp.text()?;
+    log::debug!("Google calendar listing status: {}, body length: {}", status, body.len());
+
+    let parsed = parser::parse_propfind_calendars(&body)?;
+    let mut result = Vec::new();
+
+    for cal in &parsed {
+        if !cal.is_calendar {
+            continue;
+        }
+        // Google CalDAV URLs look like: /caldav/v2/{calendarId}/events/
+        // Extract the calendarId segment (the one after /caldav/v2/)
+        let segments: Vec<&str> = cal
+            .href
+            .trim_end_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        // Find the segment after "v2" in the path
+        let cal_id = segments
+            .iter()
+            .position(|&s| s == "v2")
+            .and_then(|i| segments.get(i + 1))
+            .map(|s| percent_decode(s))
+            .unwrap_or_else(|| {
+                // Fallback: second-to-last segment
+                if segments.len() >= 2 {
+                    percent_decode(segments[segments.len() - 2])
+                } else {
+                    cal.href.clone()
+                }
+            });
+
+        let name = cal
+            .display_name
+            .clone()
+            .unwrap_or_else(|| cal_id.clone());
+
+        log::info!("Google: discovered calendar '{}' (ID: {}, color: {:?})", name.trim(), cal_id, cal.color);
+        result.push((cal_id, name.trim().to_string(), cal.color.clone()));
+    }
+
+    Ok(result)
+}
+
+/// Simple percent-decoding.
+fn percent_decode(input: &str) -> String {
+    let mut result = Vec::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
+                16,
+            ) {
+                result.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        result.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(result).unwrap_or_else(|_| input.to_string())
+}
+
 /// Fetch Google events via calendar-query REPORT.
 fn fetch_google_events(
     client: &reqwest::blocking::Client,
     calendar_url: &str,
     auth: &Auth,
     calendar_name: &str,
+    cal_color: Option<color>,
 ) -> Result<Vec<Event>> {
     let now = Utc::now().date_naive();
     let start = now - Duration::days(7);
@@ -258,7 +465,7 @@ fn fetch_google_events(
 
     let mut events = Vec::new();
     for item in &parsed {
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name);
+        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
         log::debug!(
             "Google: parsed {} events from iCal data ({} bytes)",
             parsed_events.len(),
@@ -276,6 +483,7 @@ fn fetch_google_events_propfind(
     calendar_url: &str,
     auth: &Auth,
     calendar_name: &str,
+    cal_color: Option<color>,
 ) -> Result<Vec<Event>> {
     let propfind_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -311,7 +519,7 @@ fn fetch_google_events_propfind(
     if !status.is_success() && status.as_u16() != 207 {
         // If PROPFIND with calendar-data doesn't work, try GET on individual resources
         log::debug!("PROPFIND with calendar-data failed, trying resource listing + GET");
-        return fetch_google_events_get(client, calendar_url, auth, calendar_name);
+        return fetch_google_events_get(client, calendar_url, auth, calendar_name, cal_color);
     }
 
     let parsed = parser::parse_report_events(&body)?;
@@ -320,12 +528,21 @@ fn fetch_google_events_propfind(
         parsed.len()
     );
 
+    let now = Utc::now().date_naive();
+    let range_start = now - Duration::days(7);
+    let range_end = now + Duration::days(30);
+
     let mut events = Vec::new();
     for item in &parsed {
         if item.ical_data.is_empty() {
             continue;
         }
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name);
+        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
+        // Filter to date range (PROPFIND doesn't support time-range like REPORT)
+        parsed_events.retain(|e| {
+            let d = e.start.date_naive();
+            d >= range_start && d <= range_end
+        });
         events.append(&mut parsed_events);
     }
 
@@ -338,6 +555,7 @@ fn fetch_google_events_get(
     calendar_url: &str,
     auth: &Auth,
     calendar_name: &str,
+    cal_color: Option<color>,
 ) -> Result<Vec<Event>> {
     // Simple PROPFIND to list resources
     let propfind_xml = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -391,7 +609,7 @@ fn fetch_google_events_get(
         if let Ok(resp) = get_req.send() {
             if resp.status().is_success() {
                 if let Ok(ical_data) = resp.text() {
-                    let mut parsed = ical::parse_ical_events(&ical_data, calendar_name);
+                    let mut parsed = ical::parse_ical_events(&ical_data, calendar_name, cal_color);
                     // Filter by date range
                     parsed.retain(|e| {
                         let d = e.start.date_naive();
@@ -412,15 +630,17 @@ fn fetch_google_events_get(
     Ok(events)
 }
 
-fn propfind_displayname(
+/// Fetch display name and color for a calendar via PROPFIND.
+fn propfind_calendar_props(
     client: &reqwest::blocking::Client,
     url: &str,
     auth: &Auth,
-) -> Result<Option<String>> {
+) -> (Option<String>, Option<String>) {
     let xml = r#"<?xml version="1.0" encoding="utf-8"?>
-<d:propfind xmlns:d="DAV:">
+<d:propfind xmlns:d="DAV:" xmlns:apple="http://apple.com/ns/ical/" xmlns:cs="http://calendarserver.org/ns/">
   <d:prop>
     <d:displayname/>
+    <apple:calendar-color/>
   </d:prop>
 </d:propfind>"#;
 
@@ -432,11 +652,21 @@ fn propfind_displayname(
 
     req = apply_auth(req, auth);
 
-    let resp = req.send().context("PROPFIND for displayname failed")?;
-    let body = resp.text()?;
-
-    let parsed = parser::parse_propfind_calendars(&body)?;
-    Ok(parsed.first().and_then(|c| c.display_name.clone()))
+    match req.send().and_then(|r| r.text()) {
+        Ok(body) => {
+            match parser::parse_propfind_calendars(&body) {
+                Ok(parsed) => {
+                    let first = parsed.first();
+                    (
+                        first.and_then(|c| c.display_name.clone()),
+                        first.and_then(|c| c.color.clone()),
+                    )
+                }
+                Err(_) => (None, None),
+            }
+        }
+        Err(_) => (None, None),
+    }
 }
 
 // ---- Standard CalDAV (basic auth) ----
@@ -498,7 +728,8 @@ fn fetch_server(
             server_name: server_name.to_string(),
         });
 
-        match fetch_calendar_events_with_auth(&client, &cal_url, &auth, &cal_name) {
+        let cal_color = cal.color.as_deref().and_then(parse_hex_color);
+        match fetch_calendar_events_with_auth(&client, &cal_url, &auth, &cal_name, cal_color) {
             Ok(events) => all_events.extend(events),
             Err(e) => log::warn!("Failed to fetch events from {}: {:?}", cal_name, e),
         }
@@ -577,6 +808,7 @@ fn fetch_calendar_events_with_auth(
     calendar_url: &str,
     auth: &Auth,
     calendar_name: &str,
+    cal_color: Option<color>,
 ) -> Result<Vec<Event>> {
     let now = Utc::now().date_naive();
     let start = now - Duration::days(7);
@@ -602,7 +834,7 @@ fn fetch_calendar_events_with_auth(
 
     let mut events = Vec::new();
     for item in &parsed {
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name);
+        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
         events.append(&mut parsed_events);
     }
 
