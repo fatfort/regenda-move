@@ -47,7 +47,7 @@ impl DayScene {
         tz: chrono_tz::Tz,
     ) -> Self {
         let events = filter_events(all_events, date, &calendars, &tz);
-        let list_height = 2160 - HEADER_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
+        let list_height = crate::DISPLAY_HEIGHT - HEADER_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
         let events_per_page = (list_height / EVENT_ROW_HEIGHT) as usize;
 
         DayScene {
@@ -224,7 +224,7 @@ impl Scene for DayScene {
 
         // === Event list ===
         let list_top = HEADER_HEIGHT;
-        let list_bottom = 2160 - NAV_HEIGHT - BOTTOM_HEIGHT;
+        let list_bottom = crate::DISPLAY_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
         self.event_hitboxes.clear();
 
         if self.events.is_empty() {
@@ -378,7 +378,7 @@ impl Scene for DayScene {
         }
 
         // === Navigation bar ===
-        let nav_y = (2160 - NAV_HEIGHT - BOTTOM_HEIGHT) as i32;
+        let nav_y = (crate::DISPLAY_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT) as i32;
 
         // Divider
         canvas.fill_rect(
@@ -454,7 +454,7 @@ impl Scene for DayScene {
         };
 
         // === Bottom bar ===
-        let bottom_y = (2160 - BOTTOM_HEIGHT) as i32;
+        let bottom_y = (crate::DISPLAY_HEIGHT - BOTTOM_HEIGHT) as i32;
         canvas.fill_rect(
             Point2 {
                 x: Some(0),

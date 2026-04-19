@@ -25,8 +25,8 @@ const REFRESH_MODE_CONTENT: i32 = 3;
 #[allow(dead_code)]
 const REFRESH_MODE_UI: i32 = 4;
 
-pub const RMPP_WIDTH: u32 = 1620;
-pub const RMPP_HEIGHT: u32 = 2160;
+pub const RMPP_WIDTH: u32 = 954;
+pub const RMPP_HEIGHT: u32 = 1696;
 
 // QTFB input event constants (for input.rs)
 pub const MESSAGE_USERINPUT: u8 = 4;

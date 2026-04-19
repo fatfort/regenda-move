@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
-pub const DISPLAY_WIDTH: u32 = 1620;
-pub const DISPLAY_HEIGHT: u32 = 2160;
+pub const DISPLAY_WIDTH: u32 = 954;
+pub const DISPLAY_HEIGHT: u32 = 1696;
 
 fn main() {
     if std::env::var("RUST_LOG").is_err() {
