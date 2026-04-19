@@ -10,8 +10,10 @@ const FONT_REGULAR: &[u8] = include_bytes!("../../../../res/NotoSans-Regular.ttf
 const SOCKET_PATH: &[u8] = b"/tmp/qtfb.sock\0";
 const DEFAULT_FB_KEY: u32 = 245209899;
 
+#[allow(dead_code)]
 const MESSAGE_INITIALIZE: u8 = 0;
 const MESSAGE_UPDATE: u8 = 1;
+const MESSAGE_CUSTOM_INITIALIZE: u8 = 2;
 const MESSAGE_SET_REFRESH_MODE: u8 = 5;
 const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 
@@ -45,6 +47,15 @@ struct InitContents {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct CustomInitContents {
+    framebuffer_key: u32,
+    framebuffer_type: u8,
+    width: u16,
+    height: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct UpdateContents {
     msg_type: i32,
     x: i32,
@@ -56,6 +67,7 @@ struct UpdateContents {
 #[repr(C)]
 union ClientMessageBody {
     init: InitContents,
+    custom_init: CustomInitContents,
     update: UpdateContents,
     refresh_mode: i32,
 }
@@ -134,12 +146,18 @@ impl QtfbDisplay {
         }
         log::info!("Connected to QTFB socket");
 
+        // Use CUSTOM_INITIALIZE with Move-native dimensions so QTFB allocates
+        // a 954x1696 RGB888 buffer (≈4.85MB). The default MESSAGE_INITIALIZE
+        // on the Move hands back an rMPP-sized 1620x2160 buffer (10.5MB)
+        // which causes visual fuzz when addressed at Move width.
         let init_msg = ClientMessage {
-            msg_type: MESSAGE_INITIALIZE,
+            msg_type: MESSAGE_CUSTOM_INITIALIZE,
             body: ClientMessageBody {
-                init: InitContents {
+                custom_init: CustomInitContents {
                     framebuffer_key: fb_key,
                     framebuffer_type: FBFMT_RMPP_RGB888,
+                    width: RMPP_WIDTH as u16,
+                    height: RMPP_HEIGHT as u16,
                 },
             },
         };
