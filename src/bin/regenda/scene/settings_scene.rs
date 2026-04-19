@@ -4,7 +4,7 @@ use crate::canvas::{color, mxcfb_rect, Canvas, Point2, Vector2};
 use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 
-const HEADER_HEIGHT: u32 = 120;
+const HEADER_HEIGHT: u32 = 74;
 const ROW_HEIGHT: u32 = 80;
 const MARGIN: u32 = 60;
 
@@ -80,22 +80,22 @@ impl Scene for SettingsScene {
         self.back_hitbox = canvas.draw_text_colored(
             Point2 {
                 x: 40.0,
-                y: 30.0,
+                y: 19.0,
             },
             self.strings.back,
-            42.0,
+            26.0,
             color::WHITE,
         );
-        self.back_hitbox.width += 20;
-        self.back_hitbox.height += 20;
+        self.back_hitbox.width += 12;
+        self.back_hitbox.height += 12;
 
         let title = self.strings.cals_to_see;
-        let tr = canvas.measure_text(title, 46.0);
+        let tr = canvas.measure_text(title, 28.0);
         let tx = (dw as f32 - tr.width as f32) / 2.0;
         canvas.draw_text_colored(
-            Point2 { x: tx, y: 30.0 },
+            Point2 { x: tx, y: 19.0 },
             title,
-            46.0,
+            28.0,
             color::WHITE,
         );
 

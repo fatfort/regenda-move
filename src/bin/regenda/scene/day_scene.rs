@@ -5,7 +5,7 @@ use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 use chrono::{Datelike, NaiveDate};
 
-const HEADER_HEIGHT: u32 = 120;
+const HEADER_HEIGHT: u32 = 74;
 const NAV_HEIGHT: u32 = 100;
 const BOTTOM_HEIGHT: u32 = 100;
 const EVENT_ROW_HEIGHT: u32 = 160;
@@ -189,38 +189,38 @@ impl Scene for DayScene {
         canvas.draw_text_colored(
             Point2 {
                 x: MARGIN as f32,
-                y: 25.0,
+                y: 15.0,
             },
             &date_display,
-            52.0,
+            32.0,
             color::WHITE,
         );
 
         // Settings button (top right)
         let settings_text = self.strings.settings;
-        let settings_rect = canvas.measure_text(settings_text, 36.0);
+        let settings_rect = canvas.measure_text(settings_text, 22.0);
         let sx = dw as f32 - settings_rect.width as f32 - MARGIN as f32;
         self.settings_hitbox = canvas.draw_text_colored(
-            Point2 { x: sx, y: 35.0 },
+            Point2 { x: sx, y: 22.0 },
             settings_text,
-            36.0,
+            22.0,
             color::WHITE,
         );
-        self.settings_hitbox.width += 20;
-        self.settings_hitbox.height += 20;
+        self.settings_hitbox.width += 12;
+        self.settings_hitbox.height += 12;
 
         // Refresh button
         let refresh_text = self.strings.refresh;
-        let refresh_rect = canvas.measure_text(refresh_text, 36.0);
-        let rx = sx - refresh_rect.width as f32 - 40.0;
+        let refresh_rect = canvas.measure_text(refresh_text, 22.0);
+        let rx = sx - refresh_rect.width as f32 - 25.0;
         self.refresh_hitbox = canvas.draw_text_colored(
-            Point2 { x: rx, y: 35.0 },
+            Point2 { x: rx, y: 22.0 },
             refresh_text,
-            36.0,
+            22.0,
             color::WHITE,
         );
-        self.refresh_hitbox.width += 20;
-        self.refresh_hitbox.height += 20;
+        self.refresh_hitbox.width += 12;
+        self.refresh_hitbox.height += 12;
 
         // === Event list ===
         let list_top = HEADER_HEIGHT;
@@ -296,7 +296,7 @@ impl Scene for DayScene {
                         y: (y + 20) as f32,
                     },
                     &event.summary,
-                    42.0,
+                    26.0,
                     color::BLACK,
                 );
 

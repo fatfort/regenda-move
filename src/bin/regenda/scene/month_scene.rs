@@ -6,7 +6,7 @@ use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashSet;
 
-const HEADER_HEIGHT: u32 = 120;
+const HEADER_HEIGHT: u32 = 74;
 const DOW_HEIGHT: u32 = 60;
 const MARGIN: u32 = 40;
 const GRID_TOP: u32 = HEADER_HEIGHT + DOW_HEIGHT;
@@ -124,24 +124,24 @@ impl Scene for MonthScene {
         self.back_hitbox = canvas.draw_text_colored(
             Point2 {
                 x: MARGIN as f32,
-                y: 30.0,
+                y: 19.0,
             },
             self.strings.back,
-            42.0,
+            26.0,
             color::WHITE,
         );
-        self.back_hitbox.width += 20;
-        self.back_hitbox.height += 20;
+        self.back_hitbox.width += 12;
+        self.back_hitbox.height += 12;
 
         // Month/Year title
         let month_name = self.strings.months[(self.current_month - 1) as usize];
         let title = format!("< {} {} >", month_name, self.current_year);
-        let tr = canvas.measure_text(&title, 52.0);
+        let tr = canvas.measure_text(&title, 32.0);
         let tx = (dw as f32 - tr.width as f32) / 2.0;
         canvas.draw_text_colored(
-            Point2 { x: tx, y: 25.0 },
+            Point2 { x: tx, y: 15.0 },
             &title,
-            52.0,
+            32.0,
             color::WHITE,
         );
 
@@ -149,14 +149,14 @@ impl Scene for MonthScene {
         let center = dw / 2;
         self.prev_month_hitbox = mxcfb_rect {
             top: 0,
-            left: center - 250,
-            width: 100,
+            left: center - 155,
+            width: 62,
             height: HEADER_HEIGHT,
         };
         self.next_month_hitbox = mxcfb_rect {
             top: 0,
-            left: center + 150,
-            width: 100,
+            left: center + 93,
+            width: 62,
             height: HEADER_HEIGHT,
         };
 
