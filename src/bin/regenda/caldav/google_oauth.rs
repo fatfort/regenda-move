@@ -6,7 +6,7 @@ const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code"
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CALDAV_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
 
-const TOKEN_DIR: &str = "/opt/etc/reGenda";
+const TOKEN_DIR: &str = "/home/root/.config/reGenda";
 
 /// Response from the device authorization request.
 #[derive(Deserialize, Clone, Debug)]

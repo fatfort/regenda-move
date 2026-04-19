@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-const DEFAULT_CONFIG_PATH: &str = "/opt/etc/reGenda/config.yml";
+const DEFAULT_CONFIG_PATH: &str = "/home/root/.config/reGenda/config.yml";
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Config {

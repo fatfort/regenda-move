@@ -314,7 +314,7 @@ fn run_with_error(error: &str) {
         canvas::color::BLACK,
     );
 
-    let hint = "Place config at /opt/etc/reGenda/config.yml";
+    let hint = "Place config at /home/root/.config/reGenda/config.yml";
     let hr = canvas.measure_text(hint, 36.0);
     let hx = (dw as f32 - hr.width as f32) / 2.0;
     canvas.draw_text_colored(
