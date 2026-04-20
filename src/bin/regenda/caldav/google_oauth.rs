@@ -1,12 +1,25 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::time::Duration;
 
 const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CALDAV_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
 
 const TOKEN_DIR: &str = "/opt/etc/reGenda";
+
+/// Short timeouts so offline devices fall back to the cache quickly.
+const OAUTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const OAUTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(8);
+
+fn oauth_client() -> reqwest::blocking::Client {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(OAUTH_CONNECT_TIMEOUT)
+        .timeout(OAUTH_TOTAL_TIMEOUT)
+        .build()
+        .expect("failed to build OAuth HTTP client")
+}
 
 /// Response from the device authorization request.
 #[derive(Deserialize, Clone, Debug)]
@@ -47,7 +60,7 @@ struct TokenErrorResponse {
 /// Returns the device auth response containing the user_code and verification_url
 /// that must be shown to the user.
 pub fn start_device_auth(client_id: &str) -> Result<DeviceAuthResponse> {
-    let client = reqwest::blocking::Client::new();
+    let client = oauth_client();
 
     let resp = client
         .post(GOOGLE_DEVICE_CODE_URL)
@@ -75,7 +88,7 @@ pub fn poll_for_token(
     client_secret: &str,
     device_code: &str,
 ) -> Result<Option<TokenResponse>> {
-    let client = reqwest::blocking::Client::new();
+    let client = oauth_client();
 
     let resp = client
         .post(GOOGLE_TOKEN_URL)
@@ -116,7 +129,7 @@ pub fn refresh_access_token(
     client_secret: &str,
     refresh_token: &str,
 ) -> Result<String> {
-    let client = reqwest::blocking::Client::new();
+    let client = oauth_client();
 
     let resp = client
         .post(GOOGLE_TOKEN_URL)
@@ -179,27 +192,23 @@ pub fn get_access_token(
     client_secret: &str,
 ) -> Result<Option<String>> {
     if let Some(stored) = load_stored_token(server_name) {
-        // Try to refresh
-        match refresh_access_token(client_id, client_secret, &stored.refresh_token) {
-            Ok(access_token) => {
-                // Update stored token with new access token
-                let updated = StoredToken {
-                    access_token: access_token.clone(),
-                    ..stored
-                };
-                save_stored_token(server_name, &updated).ok();
-                return Ok(Some(access_token));
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to refresh token for {}: {:?}. Re-auth needed.",
-                    server_name,
-                    e
-                );
-                // Delete stale token
-                let _ = std::fs::remove_file(token_path(server_name));
-            }
-        }
+        // Try to refresh. On failure, propagate the error so the caller can
+        // distinguish "offline / token refresh failed" from "no stored token"
+        // (Ok(None), which means device-auth flow is needed).
+        //
+        // We intentionally do NOT delete the stored token on failure — a
+        // transient network error while offline must not force re-auth on
+        // every subsequent run. Google invalidates the refresh_token on its
+        // side if it's truly bad; the next online run will simply repeat the
+        // failure and the user can re-authorize manually.
+        let access_token = refresh_access_token(client_id, client_secret, &stored.refresh_token)
+            .with_context(|| format!("refresh token failed for {}", server_name))?;
+        let updated = StoredToken {
+            access_token: access_token.clone(),
+            ..stored
+        };
+        save_stored_token(server_name, &updated).ok();
+        return Ok(Some(access_token));
     }
 
     Ok(None)

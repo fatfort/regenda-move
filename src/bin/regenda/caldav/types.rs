@@ -1,8 +1,9 @@
 use crate::canvas::color;
 use chrono::{DateTime, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
 
 /// Information about a discovered calendar.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalendarInfo {
     pub name: String,
     pub path: String,
@@ -12,7 +13,7 @@ pub struct CalendarInfo {
 }
 
 /// A single calendar event.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Event {
     pub uid: String,
     pub summary: String,
@@ -104,7 +105,14 @@ impl Ord for Event {
 #[derive(Clone, Debug)]
 pub enum FetchStatus {
     Loading { message: String },
-    Done { calendars: Vec<CalendarInfo>, events: Vec<Event> },
+    /// `stale_since` is `None` when the data came from a fresh network fetch,
+    /// or `Some(t)` when we fell back to the on-disk cache last successfully
+    /// written at `t` (the UI shows a "stale since t" banner in that case).
+    Done {
+        calendars: Vec<CalendarInfo>,
+        events: Vec<Event>,
+        stale_since: Option<DateTime<Utc>>,
+    },
     Error { message: String },
     /// One or more Google sources need OAuth device authorization.
     NeedsOAuth { server_names: Vec<String> },

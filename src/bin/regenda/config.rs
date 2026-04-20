@@ -8,6 +8,9 @@ const DEFAULT_CONFIG_PATH: &str = "/opt/etc/reGenda/config.yml";
 pub struct Config {
     pub timezone: Option<String>,
     pub language: Option<String>,
+    /// Optional override for where to persist the offline cache.
+    /// Defaults (when unset): `$REGENDA_CACHE`, else `$HOME/.config/reGenda/cache.json`.
+    pub cache_path: Option<String>,
     pub sources: HashMap<String, ServerConfig>,
 }
 

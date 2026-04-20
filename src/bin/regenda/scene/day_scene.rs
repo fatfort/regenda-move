@@ -3,9 +3,10 @@ use crate::caldav::{CalendarInfo, Event};
 use crate::canvas::{color, mxcfb_rect, Canvas, Point2, Vector2};
 use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
-use chrono::{Datelike, NaiveDate};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 const HEADER_HEIGHT: u32 = 120;
+const STALE_BANNER_HEIGHT: u32 = 50;
 const NAV_HEIGHT: u32 = 100;
 const BOTTOM_HEIGHT: u32 = 100;
 const EVENT_ROW_HEIGHT: u32 = 160;
@@ -21,6 +22,10 @@ pub struct DayScene {
     pub go_to_event: Option<usize>,
     pub refresh_pressed: bool,
     pub exit_pressed: bool,
+    /// `Some(t)` iff the currently-displayed events came from the on-disk
+    /// cache (last successful fetch at `t`). `None` when showing fresh
+    /// network data — no banner is drawn in that case.
+    pub stale_since: Option<DateTime<Utc>>,
     strings: &'static Strings,
     tz: chrono_tz::Tz,
     page: usize,
@@ -45,6 +50,7 @@ impl DayScene {
         calendars: Vec<CalendarInfo>,
         strings: &'static Strings,
         tz: chrono_tz::Tz,
+        stale_since: Option<DateTime<Utc>>,
     ) -> Self {
         let events = filter_events(all_events, date, &calendars, &tz);
         let list_height = 2160 - HEADER_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
@@ -60,6 +66,7 @@ impl DayScene {
             go_to_event: None,
             refresh_pressed: false,
             exit_pressed: false,
+            stale_since,
             strings,
             tz,
             page: 0,
@@ -81,6 +88,29 @@ impl DayScene {
         self.events = filter_events(all_events, self.current_date, &self.calendars, &self.tz);
         self.page = 0;
         self.needs_redraw = true;
+    }
+
+    /// Apply a background refresh: swap in new events/calendars and update the
+    /// stale banner timestamp without leaving the scene.
+    pub fn apply_refresh(
+        &mut self,
+        all_events: Vec<Event>,
+        calendars: Vec<CalendarInfo>,
+        stale_since: Option<DateTime<Utc>>,
+    ) {
+        self.all_events = all_events;
+        self.calendars = calendars;
+        self.stale_since = stale_since;
+        self.events = filter_events(&self.all_events, self.current_date, &self.calendars, &self.tz);
+        self.page = 0;
+        self.needs_redraw = true;
+    }
+
+    /// Total count of loaded events (across all dates), used by the main loop
+    /// to detect whether a background-refresh snapshot differs from what's
+    /// currently displayed.
+    pub fn events_total(&self) -> usize {
+        self.all_events.len()
     }
 
     fn total_pages(&self) -> usize {
@@ -222,9 +252,48 @@ impl Scene for DayScene {
         self.refresh_hitbox.width += 20;
         self.refresh_hitbox.height += 20;
 
+        // Stale banner (offline cache). Rendered as a slim strip directly
+        // below the header with a light background. Events shift down by
+        // STALE_BANNER_HEIGHT only while stale — no layout shift once a
+        // successful refresh arrives.
+        let stale_banner_h = if self.stale_since.is_some() {
+            STALE_BANNER_HEIGHT
+        } else {
+            0
+        };
+        if let Some(ts) = self.stale_since {
+            use chrono::TimeZone;
+            let local = self.tz.from_utc_datetime(&ts.naive_utc());
+            let banner = format!(
+                "{} ({})",
+                self.strings.offline,
+                local.format("%Y-%m-%d %H:%M")
+            );
+            canvas.fill_rect(
+                Point2 {
+                    x: Some(0),
+                    y: Some(HEADER_HEIGHT as i32),
+                },
+                Vector2 {
+                    x: dw,
+                    y: STALE_BANNER_HEIGHT,
+                },
+                color::LIGHT_GRAY,
+            );
+            canvas.draw_text_colored(
+                Point2 {
+                    x: MARGIN as f32,
+                    y: (HEADER_HEIGHT + 8) as f32,
+                },
+                &banner,
+                30.0,
+                color::DARK_GRAY,
+            );
+        }
+
         // === Event list ===
-        let list_top = HEADER_HEIGHT;
-        let list_bottom = 2160 - NAV_HEIGHT - BOTTOM_HEIGHT;
+        let list_top = HEADER_HEIGHT + stale_banner_h;
+        let list_bottom = crate::DISPLAY_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
         self.event_hitboxes.clear();
 
         if self.events.is_empty() {

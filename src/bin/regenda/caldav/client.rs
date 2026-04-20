@@ -1,3 +1,4 @@
+use super::cache;
 use super::google_oauth;
 use super::ical;
 use super::parser;
@@ -8,6 +9,21 @@ use anyhow::{bail, Context, Result};
 use chrono::{Duration, NaiveDate, Utc};
 
 const GOOGLE_CALDAV_BASE: &str = "https://apidata.googleusercontent.com/caldav/v2";
+
+/// Fast offline detection: fail the TCP connect in 3s.
+const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Overall cap on a single HTTP request — long enough that slow-but-online
+/// CalDAV servers still complete, short enough that the cached-fallback path
+/// doesn't leave the UI hanging.
+const HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn http_client() -> Result<reqwest::blocking::Client> {
+    reqwest::blocking::Client::builder()
+        .connect_timeout(HTTP_CONNECT_TIMEOUT)
+        .timeout(HTTP_TOTAL_TIMEOUT)
+        .build()
+        .context("Failed to build HTTP client")
+}
 
 /// Auth method for a CalDAV request.
 enum Auth {
@@ -127,22 +143,59 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
         }
     }
 
+    let cache_path = cache::resolve_path(config.cache_path.as_deref());
+
+    // Successful fetch → persist cache, return fresh Done.
+    if !all_calendars.is_empty() {
+        all_events.sort();
+        if let Err(e) = cache::save(&cache_path, &all_calendars, &all_events) {
+            log::warn!("Failed to write cache: {:?}", e);
+        }
+        return FetchStatus::Done {
+            calendars: all_calendars,
+            events: all_events,
+            stale_since: None,
+        };
+    }
+
+    // Nothing came through. Before surfacing NeedsOAuth or Error, try the
+    // on-disk cache — device offline should degrade to the last known-good
+    // snapshot, not to a blocking OAuth prompt or error screen.
+    if !errors.is_empty() || !pending_oauth.is_empty() {
+        if let Some(cached) = cache::load(&cache_path) {
+            log::info!(
+                "All sources failed ({} errors, {} pending oauth). Serving cached data from {}.",
+                errors.len(),
+                pending_oauth.len(),
+                cached.fetched_at
+            );
+            return FetchStatus::Done {
+                calendars: cached.calendars,
+                events: cached.events,
+                stale_since: Some(cached.fetched_at),
+            };
+        }
+    }
+
+    // No cache, no data. If any source needs OAuth, surface that so the user
+    // can authorize; otherwise this is a real error worth showing.
     if !pending_oauth.is_empty() {
         return FetchStatus::NeedsOAuth {
             server_names: pending_oauth,
         };
     }
 
-    if all_calendars.is_empty() && !errors.is_empty() {
-        FetchStatus::Error {
+    if !errors.is_empty() {
+        return FetchStatus::Error {
             message: errors.join("\n"),
-        }
-    } else {
-        all_events.sort();
-        FetchStatus::Done {
-            calendars: all_calendars,
-            events: all_events,
-        }
+        };
+    }
+
+    // No sources configured at all.
+    FetchStatus::Done {
+        calendars: Vec::new(),
+        events: Vec::new(),
+        stale_since: None,
     }
 }
 
@@ -159,10 +212,7 @@ fn fetch_google(
     calendar_ids: &[String],
     server_config: &ServerConfig,
 ) -> Result<(Vec<CalendarInfo>, Vec<Event>)> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = http_client()?;
 
     let auth = Auth::Bearer {
         token: access_token.to_string(),
@@ -702,10 +752,7 @@ fn fetch_server(
     username: &str,
     password: &str,
 ) -> Result<(Vec<CalendarInfo>, Vec<Event>)> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = http_client()?;
 
     let auth = Auth::Basic {
         username: username.to_string(),
@@ -890,10 +937,7 @@ fn fetch_ics(
 
     log::info!("ICS {}: fetching {}", server_name, http_url);
 
-    let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = http_client()?;
 
     let resp = client
         .get(&http_url)

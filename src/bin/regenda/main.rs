@@ -12,12 +12,13 @@ mod i18n;
 mod rmpp_hal;
 mod scene;
 
-use crate::caldav::FetchStatus;
+use crate::caldav::{cache, FetchStatus};
 use crate::canvas::Canvas;
 use crate::config::Config;
 use crate::rmpp_hal::input::start_input_threads;
 use crate::rmpp_hal::types::InputEvent;
 use crate::scene::*;
+use chrono::{DateTime, Utc};
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -59,11 +60,35 @@ fn main() {
     let (input_tx, input_rx) = std::sync::mpsc::channel::<InputEvent>();
     start_input_threads(input_tx, canvas.qtfb_fd());
 
-    // Start CalDAV fetch on background thread
-    let fetch_status = Arc::new(Mutex::new(FetchStatus::Loading {
-        message: strings.loading.to_string(),
-    }));
+    // Offline-first: try loading the cache before hitting the network. If
+    // a cache exists, we skip the loading scene entirely and render with
+    // cached events immediately; the background refresh still runs and will
+    // swap in fresh data (clearing the stale banner) when it succeeds.
+    let cache_path = cache::resolve_path(config.cache_path.as_deref());
+    let cached = cache::load(&cache_path);
 
+    // Shared app state
+    let mut all_events: Vec<caldav::Event> = Vec::new();
+    let mut all_calendars: Vec<caldav::CalendarInfo> = Vec::new();
+    let mut current_stale_since: Option<DateTime<Utc>> = None;
+
+    let fetch_status = if let Some(ref c) = cached {
+        all_events = c.events.clone();
+        all_calendars = c.calendars.clone();
+        current_stale_since = Some(c.fetched_at);
+        Arc::new(Mutex::new(FetchStatus::Done {
+            calendars: c.calendars.clone(),
+            events: c.events.clone(),
+            stale_since: Some(c.fetched_at),
+        }))
+    } else {
+        Arc::new(Mutex::new(FetchStatus::Loading {
+            message: strings.loading.to_string(),
+        }))
+    };
+
+    // Always kick off a background refresh on startup — fresh data wins when
+    // online; offline re-runs silently keep showing the cached snapshot.
     {
         let status = fetch_status.clone();
         let config_clone = config.clone();
@@ -77,18 +102,39 @@ fn main() {
     const FPS: u16 = 10;
     const FRAME_DURATION: Duration = Duration::from_millis(1000 / FPS as u64);
 
-    let mut current_scene: Box<dyn Scene> =
-        Box::new(LoadingScene::new(fetch_status.clone(), strings));
-
-    // Shared app state
-    let mut all_events: Vec<caldav::Event> = Vec::new();
-    let mut all_calendars: Vec<caldav::CalendarInfo> = Vec::new();
+    // If we already have cached data, render the Day view immediately. Otherwise
+    // show the loading scene and wait for the first fetch result.
+    let mut current_scene: Box<dyn Scene> = if cached.is_some() {
+        let today = chrono::Local::now().date_naive();
+        Box::new(DayScene::new(
+            today,
+            &all_events,
+            all_calendars.clone(),
+            strings,
+            tz,
+            current_stale_since,
+        ))
+    } else {
+        Box::new(LoadingScene::new(fetch_status.clone(), strings))
+    };
 
     loop {
         let before_input = SystemTime::now();
         for event in input_rx.try_iter() {
             current_scene.on_input(event);
         }
+
+        // Background refresh poll: if the spawned fetch thread has produced
+        // fresh (or fallback-cached) results, fold them into the live DayScene
+        // without leaving the scene. Staying in-place avoids a loading-screen
+        // flicker on every successful background refresh.
+        apply_background_refresh(
+            &mut current_scene,
+            &fetch_status,
+            &mut all_events,
+            &mut all_calendars,
+            &mut current_stale_since,
+        );
 
         current_scene.draw(&mut canvas);
         current_scene = update(
@@ -100,6 +146,7 @@ fn main() {
             tz,
             &mut all_events,
             &mut all_calendars,
+            &mut current_stale_since,
         );
 
         let elapsed = before_input.elapsed().unwrap();
@@ -107,6 +154,42 @@ fn main() {
             sleep(FRAME_DURATION - elapsed);
         }
     }
+}
+
+/// Check the shared fetch status and, if the current scene is a `DayScene`,
+/// fold any completed background-refresh result into it in place.
+fn apply_background_refresh(
+    current_scene: &mut Box<dyn Scene>,
+    fetch_status: &Arc<Mutex<FetchStatus>>,
+    all_events: &mut Vec<caldav::Event>,
+    all_calendars: &mut Vec<caldav::CalendarInfo>,
+    current_stale_since: &mut Option<DateTime<Utc>>,
+) {
+    let status = fetch_status.lock().unwrap().clone();
+    let FetchStatus::Done {
+        calendars,
+        events,
+        stale_since,
+    } = status
+    else {
+        return;
+    };
+
+    let Some(day) = current_scene.downcast_mut::<DayScene>() else {
+        return;
+    };
+
+    // Only apply if the snapshot differs from what DayScene is already showing.
+    // Compares `stale_since` (None = fresh) and event count to avoid re-applying
+    // the same snapshot every frame.
+    if day.stale_since == stale_since && day.events_total() == events.len() {
+        return;
+    }
+
+    *all_events = events.clone();
+    *all_calendars = calendars.clone();
+    *current_stale_since = stale_since;
+    day.apply_refresh(events, calendars, stale_since);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,15 +202,22 @@ fn update(
     tz: chrono_tz::Tz,
     all_events: &mut Vec<caldav::Event>,
     all_calendars: &mut Vec<caldav::CalendarInfo>,
+    current_stale_since: &mut Option<DateTime<Utc>>,
 ) -> Box<dyn Scene> {
     // Loading scene transitions
     if let Some(loading) = scene.downcast_ref::<LoadingScene>() {
         if loading.data_ready {
             // Extract data from fetch status
             let status = fetch_status.lock().unwrap().clone();
-            if let FetchStatus::Done { calendars, events } = status {
+            if let FetchStatus::Done {
+                calendars,
+                events,
+                stale_since,
+            } = status
+            {
                 *all_calendars = calendars;
                 *all_events = events;
+                *current_stale_since = stale_since;
             }
             let today = chrono::Local::now().date_naive();
             return Box::new(DayScene::new(
@@ -136,6 +226,7 @@ fn update(
                 all_calendars.clone(),
                 strings,
                 tz,
+                *current_stale_since,
             ));
         }
         if !loading.needs_oauth.is_empty() {
@@ -239,6 +330,7 @@ fn update(
                 all_calendars.clone(),
                 strings,
                 tz,
+                *current_stale_since,
             ));
         }
         if let Some(date) = month.selected_date {
@@ -248,6 +340,7 @@ fn update(
                 all_calendars.clone(),
                 strings,
                 tz,
+                *current_stale_since,
             ));
         }
     }
@@ -262,6 +355,7 @@ fn update(
                 all_calendars.clone(),
                 strings,
                 tz,
+                *current_stale_since,
             ));
         }
     }
@@ -278,6 +372,7 @@ fn update(
                 all_calendars.clone(),
                 strings,
                 tz,
+                *current_stale_since,
             ));
         }
     }

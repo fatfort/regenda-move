@@ -27,7 +27,7 @@ impl mxcfb_rect {
 }
 
 /// RGB color. The RPP Gallery 3 e-ink display supports color via QTFB RGB888.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct color {
     pub r: u8,
     pub g: u8,
