@@ -7,7 +7,7 @@ const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code"
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_CALDAV_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
 
-const TOKEN_DIR: &str = "/opt/etc/reGenda";
+const TOKEN_DIR: &str = "/home/root/.config/reGenda";
 
 /// Short timeouts so offline devices fall back to the cache quickly.
 const OAUTH_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);

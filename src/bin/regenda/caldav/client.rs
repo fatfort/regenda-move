@@ -6,7 +6,8 @@ use super::types::{parse_hex_color, CalendarInfo, Event, FetchStatus};
 use crate::canvas::color;
 use crate::config::{Config, ServerConfig};
 use anyhow::{bail, Context, Result};
-use chrono::{Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
+use std::collections::HashSet;
 
 const GOOGLE_CALDAV_BASE: &str = "https://apidata.googleusercontent.com/caldav/v2";
 
@@ -37,6 +38,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
     let mut all_events = Vec::new();
     let mut errors = Vec::new();
     let mut pending_oauth: Vec<String> = Vec::new();
+    let mut successful_sources: HashSet<String> = HashSet::new();
 
     for (server_name, server_config) in &config.sources {
         log::info!(
@@ -78,6 +80,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
                             );
                             all_calendars.extend(cals);
                             all_events.extend(evts);
+                            successful_sources.insert(server_name.clone());
                         }
                         Err(e) => {
                             log::error!("Failed to fetch from Google {}: {:?}", server_name, e);
@@ -113,6 +116,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
                     );
                     all_calendars.extend(cals);
                     all_events.extend(evts);
+                    successful_sources.insert(server_name.clone());
                 }
                 Err(e) => {
                     log::error!("Failed to fetch ICS from {}: {:?}", server_name, e);
@@ -134,6 +138,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
                 Ok((cals, evts)) => {
                     all_calendars.extend(cals);
                     all_events.extend(evts);
+                    successful_sources.insert(server_name.clone());
                 }
                 Err(e) => {
                     log::error!("Failed to fetch from {}: {:?}", server_name, e);
@@ -144,9 +149,56 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
     }
 
     let cache_path = cache::resolve_path(config.cache_path.as_deref());
+    let prior_cache = cache::load(&cache_path);
 
-    // Successful fetch → persist cache, return fresh Done.
-    if !all_calendars.is_empty() {
+    // For any configured source that didn't return data this run (errored,
+    // pending OAuth, or just absent), fold its last-known-good entries from
+    // the cache back into the result. Without this, one source succeeding
+    // (e.g. a static `ics` GET) while another silently failed (e.g. Google
+    // OAuth refresh) would persist a partial cache and progressively wipe
+    // the failing source's calendars from the UI on every subsequent run.
+    let mut stale_since: Option<DateTime<Utc>> = None;
+    if let Some(ref cached) = prior_cache {
+        for source_name in config.sources.keys() {
+            if successful_sources.contains(source_name) {
+                continue;
+            }
+            let cached_cal_names: HashSet<String> = cached
+                .calendars
+                .iter()
+                .filter(|c| c.server_name == *source_name)
+                .map(|c| c.name.clone())
+                .collect();
+            if cached_cal_names.is_empty() {
+                continue;
+            }
+            log::info!(
+                "Source {} unavailable this run — folding in {} cached calendars from {}",
+                source_name,
+                cached_cal_names.len(),
+                cached.fetched_at
+            );
+            stale_since = Some(cached.fetched_at);
+            for cal in &cached.calendars {
+                if cal.server_name == *source_name {
+                    all_calendars.push(cal.clone());
+                }
+            }
+            for evt in &cached.events {
+                if cached_cal_names.contains(&evt.calendar_name) {
+                    all_events.push(evt.clone());
+                }
+            }
+        }
+    }
+
+    // Only persist the cache when every configured source returned fresh
+    // data. Saving on partial success would let a transient failure shrink
+    // the cache; the cache stays as the "last known-good complete snapshot"
+    // so a single bad run can't silently drop a source's calendars.
+    let full_success = !config.sources.is_empty()
+        && successful_sources.len() == config.sources.len();
+    if full_success {
         all_events.sort();
         if let Err(e) = cache::save(&cache_path, &all_calendars, &all_events) {
             log::warn!("Failed to write cache: {:?}", e);
@@ -158,27 +210,18 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
         };
     }
 
-    // Nothing came through. Before surfacing NeedsOAuth or Error, try the
-    // on-disk cache — device offline should degrade to the last known-good
-    // snapshot, not to a blocking OAuth prompt or error screen.
-    if !errors.is_empty() || !pending_oauth.is_empty() {
-        if let Some(cached) = cache::load(&cache_path) {
-            log::info!(
-                "All sources failed ({} errors, {} pending oauth). Serving cached data from {}.",
-                errors.len(),
-                pending_oauth.len(),
-                cached.fetched_at
-            );
-            return FetchStatus::Done {
-                calendars: cached.calendars,
-                events: cached.events,
-                stale_since: Some(cached.fetched_at),
-            };
-        }
+    if !all_calendars.is_empty() {
+        all_events.sort();
+        return FetchStatus::Done {
+            calendars: all_calendars,
+            events: all_events,
+            stale_since,
+        };
     }
 
-    // No cache, no data. If any source needs OAuth, surface that so the user
-    // can authorize; otherwise this is a real error worth showing.
+    // Nothing fresh, nothing folded from cache. If any source needs OAuth,
+    // surface that so the user can authorize; otherwise this is a real
+    // error worth showing.
     if !pending_oauth.is_empty() {
         return FetchStatus::NeedsOAuth {
             server_names: pending_oauth,
