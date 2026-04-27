@@ -207,6 +207,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
             calendars: all_calendars,
             events: all_events,
             stale_since: None,
+            pending_oauth: Vec::new(),
         };
     }
 
@@ -216,6 +217,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
             calendars: all_calendars,
             events: all_events,
             stale_since,
+            pending_oauth,
         };
     }
 
@@ -239,6 +241,7 @@ pub fn fetch_all(config: &Config) -> FetchStatus {
         calendars: Vec::new(),
         events: Vec::new(),
         stale_since: None,
+        pending_oauth: Vec::new(),
     }
 }
 

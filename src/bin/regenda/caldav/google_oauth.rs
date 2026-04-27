@@ -192,23 +192,35 @@ pub fn get_access_token(
     client_secret: &str,
 ) -> Result<Option<String>> {
     if let Some(stored) = load_stored_token(server_name) {
-        // Try to refresh. On failure, propagate the error so the caller can
-        // distinguish "offline / token refresh failed" from "no stored token"
-        // (Ok(None), which means device-auth flow is needed).
-        //
         // We intentionally do NOT delete the stored token on failure — a
         // transient network error while offline must not force re-auth on
         // every subsequent run. Google invalidates the refresh_token on its
         // side if it's truly bad; the next online run will simply repeat the
         // failure and the user can re-authorize manually.
-        let access_token = refresh_access_token(client_id, client_secret, &stored.refresh_token)
-            .with_context(|| format!("refresh token failed for {}", server_name))?;
-        let updated = StoredToken {
-            access_token: access_token.clone(),
-            ..stored
-        };
-        save_stored_token(server_name, &updated).ok();
-        return Ok(Some(access_token));
+        //
+        // On any refresh error, return Ok(None) so the caller treats the
+        // source as pending OAuth. Returning Err would route the source into
+        // the generic error list, where the OAuth scene is unreachable —
+        // even a revoked token wouldn't recover, since the user would never
+        // be re-prompted.
+        match refresh_access_token(client_id, client_secret, &stored.refresh_token) {
+            Ok(access_token) => {
+                let updated = StoredToken {
+                    access_token: access_token.clone(),
+                    ..stored
+                };
+                save_stored_token(server_name, &updated).ok();
+                return Ok(Some(access_token));
+            }
+            Err(e) => {
+                log::warn!(
+                    "refresh failed for {}: {:?}; treating as pending OAuth",
+                    server_name,
+                    e
+                );
+                return Ok(None);
+            }
+        }
     }
 
     Ok(None)

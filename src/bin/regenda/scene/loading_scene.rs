@@ -50,8 +50,12 @@ impl Scene for LoadingScene {
         // Check fetch status
         let status = self.fetch_status.lock().unwrap().clone();
         match &status {
-            FetchStatus::Done { .. } => {
+            FetchStatus::Done { pending_oauth, .. } => {
                 self.data_ready = true;
+                // Surface any pending OAuth sources alongside Done — the
+                // main update loop picks the next non-dismissed one and
+                // routes to OAuthScene before going to DayScene.
+                self.needs_oauth = pending_oauth.clone();
                 return;
             }
             FetchStatus::Error { message } => {

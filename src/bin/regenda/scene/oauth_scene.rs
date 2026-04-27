@@ -25,7 +25,10 @@ enum OAuthPhase {
 pub struct OAuthScene {
     pub auth_complete: bool,
     pub cancel_pressed: bool,
-    server_name: String,
+    /// Source name (config key) that this OAuth flow targets. Read by the
+    /// main update loop so cancel can mark this source as dismissed for
+    /// the rest of the session.
+    pub server_name: String,
     client_id: String,
     client_secret: String,
     phase: OAuthPhase,

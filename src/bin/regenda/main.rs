@@ -19,6 +19,7 @@ use crate::rmpp_hal::input::start_input_threads;
 use crate::rmpp_hal::types::InputEvent;
 use crate::scene::*;
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
@@ -80,12 +81,19 @@ fn main() {
             calendars: c.calendars.clone(),
             events: c.events.clone(),
             stale_since: Some(c.fetched_at),
+            pending_oauth: Vec::new(),
         }))
     } else {
         Arc::new(Mutex::new(FetchStatus::Loading {
             message: strings.loading.to_string(),
         }))
     };
+
+    // Sources the user has cancelled out of OAuth for during this session.
+    // Avoids re-prompting on every refresh — re-launch regenda to retry.
+    // In-memory only by design (per spec): cancellation shouldn't persist
+    // across restarts.
+    let mut dismissed_oauth: HashSet<String> = HashSet::new();
 
     // Always kick off a background refresh on startup — fresh data wins when
     // online; offline re-runs silently keep showing the cached snapshot.
@@ -147,6 +155,7 @@ fn main() {
             &mut all_events,
             &mut all_calendars,
             &mut current_stale_since,
+            &mut dismissed_oauth,
         );
 
         let elapsed = before_input.elapsed().unwrap();
@@ -170,6 +179,7 @@ fn apply_background_refresh(
         calendars,
         events,
         stale_since,
+        pending_oauth: _,
     } = status
     else {
         return;
@@ -203,9 +213,24 @@ fn update(
     all_events: &mut Vec<caldav::Event>,
     all_calendars: &mut Vec<caldav::CalendarInfo>,
     current_stale_since: &mut Option<DateTime<Utc>>,
+    dismissed_oauth: &mut HashSet<String>,
 ) -> Box<dyn Scene> {
     // Loading scene transitions
     if let Some(loading) = scene.downcast_ref::<LoadingScene>() {
+        // OAuth takes precedence over DayScene transition: if any pending
+        // source hasn't been dismissed this session, route through OAuthScene.
+        // This applies whether `needs_oauth` came from FetchStatus::Done's
+        // pending_oauth (partial success) or NeedsOAuth (everything failed).
+        if let Some(server_name) = loading
+            .needs_oauth
+            .iter()
+            .find(|s| !dismissed_oauth.contains(*s))
+            .cloned()
+        {
+            if let Some(server_config) = config.sources.get(&server_name) {
+                return Box::new(OAuthScene::new(server_name, server_config, strings));
+            }
+        }
         if loading.data_ready {
             // Extract data from fetch status
             let status = fetch_status.lock().unwrap().clone();
@@ -213,6 +238,7 @@ fn update(
                 calendars,
                 events,
                 stale_since,
+                pending_oauth: _,
             } = status
             {
                 *all_calendars = calendars;
@@ -228,17 +254,6 @@ fn update(
                 tz,
                 *current_stale_since,
             ));
-        }
-        if !loading.needs_oauth.is_empty() {
-            // Start OAuth flow for the first pending Google source
-            let server_name = loading.needs_oauth[0].clone();
-            if let Some(server_config) = config.sources.get(&server_name) {
-                return Box::new(OAuthScene::new(
-                    server_name,
-                    server_config,
-                    strings,
-                ));
-            }
         }
         if loading.retry_pressed {
             // Retry fetch
@@ -258,6 +273,13 @@ fn update(
     // OAuth scene transitions
     if let Some(oauth) = scene.downcast_ref::<OAuthScene>() {
         if oauth.auth_complete || oauth.cancel_pressed {
+            // Cancel marks the source as dismissed so the next refresh
+            // doesn't immediately re-prompt for the same source. auth_complete
+            // does NOT dismiss — the next fetch will see the new token, drop
+            // the source from pending_oauth, and the user moves on naturally.
+            if oauth.cancel_pressed {
+                dismissed_oauth.insert(oauth.server_name.clone());
+            }
             // Re-fetch all calendars (token is now stored)
             let status_clone = fetch_status.clone();
             let config_clone = config.clone();
@@ -374,6 +396,28 @@ fn update(
                 tz,
                 *current_stale_since,
             ));
+        }
+    }
+
+    // Cross-scene OAuth fallback: if a background refresh produced a Done with
+    // pending OAuth sources and the user is sitting on a non-Loading/non-OAuth
+    // scene (e.g. DayScene from a cached startup), pull them into OAuthScene
+    // so the device-auth flow is reachable. Skipped for LoadingScene (handled
+    // above) and OAuthScene (already there).
+    if scene.downcast_ref::<OAuthScene>().is_none()
+        && scene.downcast_ref::<LoadingScene>().is_none()
+    {
+        let status = fetch_status.lock().unwrap().clone();
+        if let FetchStatus::Done { pending_oauth, .. } = status {
+            if let Some(server_name) = pending_oauth
+                .iter()
+                .find(|s| !dismissed_oauth.contains(*s))
+                .cloned()
+            {
+                if let Some(server_config) = config.sources.get(&server_name) {
+                    return Box::new(OAuthScene::new(server_name, server_config, strings));
+                }
+            }
         }
     }
 

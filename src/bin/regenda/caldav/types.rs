@@ -108,12 +108,18 @@ pub enum FetchStatus {
     /// `stale_since` is `None` when the data came from a fresh network fetch,
     /// or `Some(t)` when we fell back to the on-disk cache last successfully
     /// written at `t` (the UI shows a "stale since t" banner in that case).
+    ///
+    /// `pending_oauth` lists Google sources that still need device-auth. The
+    /// UI surfaces these via OAuthScene even when other sources succeeded —
+    /// otherwise a working ICS source masks Google sources that need authorization.
     Done {
         calendars: Vec<CalendarInfo>,
         events: Vec<Event>,
         stale_since: Option<DateTime<Utc>>,
+        pending_oauth: Vec<String>,
     },
     Error { message: String },
-    /// One or more Google sources need OAuth device authorization.
+    /// One or more Google sources need OAuth device authorization, and no
+    /// other source returned data. Kept for the "nothing to show at all" path.
     NeedsOAuth { server_names: Vec<String> },
 }
