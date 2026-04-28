@@ -247,7 +247,7 @@ fn parse_vevent(
     for prop in &vevent.properties {
         match prop.name.as_str() {
             "SUMMARY" => {
-                summary = prop.value.clone().unwrap_or_default();
+                summary = unescape_ical_text(&prop.value.clone().unwrap_or_default());
             }
             "UID" => {
                 uid = prop.value.clone().unwrap_or_default();
@@ -265,19 +265,14 @@ fn parse_vevent(
                 }
             }
             "LOCATION" => {
-                let val = prop.value.clone().unwrap_or_default();
+                let val = unescape_ical_text(&prop.value.clone().unwrap_or_default());
                 if !val.is_empty() {
                     location = Some(val);
                 }
             }
             "DESCRIPTION" => {
-                let val = prop.value.clone().unwrap_or_default();
+                let val = unescape_ical_text(&prop.value.clone().unwrap_or_default());
                 if !val.is_empty() {
-                    let val = val
-                        .replace("\\n", "\n")
-                        .replace("\\,", ",")
-                        .replace("\\;", ";")
-                        .replace("\\\\", "\\");
                     description = Some(val);
                 }
             }
@@ -344,6 +339,30 @@ fn parse_vevent(
         exdates,
         recurrence_id,
     })
+}
+
+/// Unescape iCalendar TEXT-typed property values per RFC 5545 §3.3.11.
+fn unescape_ical_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') | Some('N') => out.push('\n'),
+                Some(',') => out.push(','),
+                Some(';') => out.push(';'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn extract_tzid(params: Option<&Vec<(String, Vec<String>)>>) -> Option<String> {
