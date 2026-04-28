@@ -88,7 +88,7 @@ pub const ENGLISH: Strings = Strings {
     month_view: "Month View",
     refresh: "Refresh",
     refreshing: "Refreshing...",
-    no_config: "No config file found. Place config at /opt/etc/reGenda/config.yml",
+    no_config: "No config file found. Place config at /home/root/.config/reGenda/config.yml",
     offline: "Offline - showing cached data",
 };
 
@@ -144,7 +144,7 @@ pub const CZECH: Strings = Strings {
     month_view: "Mesicni prehled",
     refresh: "Obnovit",
     refreshing: "Nacitani...",
-    no_config: "Konfiguracni soubor nenalezen. Umistete config do /opt/etc/reGenda/config.yml",
+    no_config: "Konfiguracni soubor nenalezen. Umistete config do /home/root/.config/reGenda/config.yml",
     offline: "Offline - zobrazuji ulozena data",
 };
 

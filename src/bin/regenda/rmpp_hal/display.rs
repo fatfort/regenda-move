@@ -1,4 +1,4 @@
-use super::types::{color, mxcfb_rect};
+use super::types::{color, mxcfb_rect, DeviceKind, DisplayInfo};
 use cgmath::Point2;
 use image::RgbImage;
 use std::os::unix::io::RawFd;
@@ -10,8 +10,10 @@ const FONT_REGULAR: &[u8] = include_bytes!("../../../../res/NotoSans-Regular.ttf
 const SOCKET_PATH: &[u8] = b"/tmp/qtfb.sock\0";
 const DEFAULT_FB_KEY: u32 = 245209899;
 
+#[allow(dead_code)]
 const MESSAGE_INITIALIZE: u8 = 0;
 const MESSAGE_UPDATE: u8 = 1;
+const MESSAGE_CUSTOM_INITIALIZE: u8 = 2;
 const MESSAGE_SET_REFRESH_MODE: u8 = 5;
 const MESSAGE_REQUEST_FULL_REFRESH: u8 = 6;
 
@@ -25,8 +27,41 @@ const REFRESH_MODE_CONTENT: i32 = 3;
 #[allow(dead_code)]
 const REFRESH_MODE_UI: i32 = 4;
 
-pub const RMPP_WIDTH: u32 = 1620;
-pub const RMPP_HEIGHT: u32 = 2160;
+/// Detect which rM device we're running on. Move (porsche) reports as
+/// "reMarkable Chiappa" / hostname `imx93-chiappa`; Ferrari (rMPP) reports
+/// as "reMarkable Ferrari" / hostname `imx8mm-ferrari`. We sniff
+/// `/sys/devices/soc0/machine`, the device-tree model, and the hostname for
+/// "chiappa" or "imx93" → Move; otherwise default to Ferrari (the
+/// conservative choice — an unknown rMPP-class device gets the plain INIT
+/// path that matches its natural buffer size).
+fn detect_device() -> DeviceKind {
+    let mut sources: Vec<String> = Vec::new();
+    for path in [
+        "/sys/devices/soc0/machine",
+        "/sys/firmware/devicetree/base/model",
+        "/etc/hostname",
+    ] {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            sources.push(s);
+        }
+    }
+
+    let mut buf = [0u8; 256];
+    let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
+    if rc == 0 {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        if let Ok(hostname) = std::str::from_utf8(&buf[..end]) {
+            sources.push(hostname.to_string());
+        }
+    }
+
+    let joined = sources.join(" ").to_ascii_lowercase();
+    log::info!("Device detection sources: {}", joined.trim());
+    if joined.contains("chiappa") || joined.contains("imx93") {
+        return DeviceKind::Move;
+    }
+    DeviceKind::Ferrari
+}
 
 // QTFB input event constants (for input.rs)
 pub const MESSAGE_USERINPUT: u8 = 4;
@@ -45,6 +80,15 @@ struct InitContents {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct CustomInitContents {
+    framebuffer_key: u32,
+    framebuffer_type: u8,
+    width: u16,
+    height: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct UpdateContents {
     msg_type: i32,
     x: i32,
@@ -56,6 +100,7 @@ struct UpdateContents {
 #[repr(C)]
 union ClientMessageBody {
     init: InitContents,
+    custom_init: CustomInitContents,
     update: UpdateContents,
     refresh_mode: i32,
 }
@@ -79,7 +124,7 @@ struct ServerMessage {
     init: InitResponseBody,
 }
 
-/// QTFB shared-memory display backend for reMarkable Paper Pro.
+/// QTFB shared-memory display backend for reMarkable Paper Pro / Move.
 pub struct QtfbDisplay {
     fd: RawFd,
     buffer: *mut u8,
@@ -88,12 +133,20 @@ pub struct QtfbDisplay {
     height: u32,
     bpp: u32,
     font_regular: fontdue::Font,
+    device: DeviceKind,
 }
 
 unsafe impl Send for QtfbDisplay {}
 
 impl QtfbDisplay {
     pub fn new() -> Self {
+        let device = detect_device();
+        let (width, height) = device.dims();
+        log::info!(
+            "Detected device: {:?} ({}x{})",
+            device, width, height
+        );
+
         let fb_key = std::env::var("QTFB_KEY")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
@@ -134,12 +187,30 @@ impl QtfbDisplay {
         }
         log::info!("Connected to QTFB socket");
 
-        let init_msg = ClientMessage {
-            msg_type: MESSAGE_INITIALIZE,
-            body: ClientMessageBody {
-                init: InitContents {
-                    framebuffer_key: fb_key,
-                    framebuffer_type: FBFMT_RMPP_RGB888,
+        // On Move, the default MESSAGE_INITIALIZE returns an rMPP-sized
+        // (1620x2160) buffer that causes full-screen visual fuzz when
+        // addressed at Move width — so we issue MESSAGE_CUSTOM_INITIALIZE
+        // with explicit 954x1696 dims. On Ferrari, the default INIT type
+        // returns the natural 1620x2160 buffer and works as-is.
+        let init_msg = match device {
+            DeviceKind::Move => ClientMessage {
+                msg_type: MESSAGE_CUSTOM_INITIALIZE,
+                body: ClientMessageBody {
+                    custom_init: CustomInitContents {
+                        framebuffer_key: fb_key,
+                        framebuffer_type: FBFMT_RMPP_RGB888,
+                        width: width as u16,
+                        height: height as u16,
+                    },
+                },
+            },
+            DeviceKind::Ferrari => ClientMessage {
+                msg_type: MESSAGE_INITIALIZE,
+                body: ClientMessageBody {
+                    init: InitContents {
+                        framebuffer_key: fb_key,
+                        framebuffer_type: FBFMT_RMPP_RGB888,
+                    },
                 },
             },
         };
@@ -177,14 +248,17 @@ impl QtfbDisplay {
 
         let shm_key = server_msg.init.shm_key_defined;
         let shm_size = server_msg.init.shm_size;
+        let expected = width as usize * height as usize * 3;
         log::info!(
-            "QTFB SHM key: {}, size: {} bytes ({}x{} RGB888 = {})",
-            shm_key,
-            shm_size,
-            RMPP_WIDTH,
-            RMPP_HEIGHT,
-            RMPP_WIDTH as usize * RMPP_HEIGHT as usize * 3
+            "QTFB SHM key: {}, size: {} bytes (expected {}x{} RGB888 = {})",
+            shm_key, shm_size, width, height, expected
         );
+        if shm_size != expected {
+            log::warn!(
+                "QTFB shm_size ({}) does not match {:?} dims ({}x{}x3 = {}); display may render incorrectly",
+                shm_size, device, width, height, expected
+            );
+        }
 
         let shm_path = format!("/dev/shm/qtfb_{}", shm_key);
         let shm_file = std::fs::OpenOptions::new()
@@ -238,21 +312,18 @@ impl QtfbDisplay {
             fd,
             buffer: shm_ptr as *mut u8,
             buffer_size: shm_size,
-            width: RMPP_WIDTH,
-            height: RMPP_HEIGHT,
+            width,
+            height,
             bpp: 3,
             font_regular,
+            device,
         };
 
         display.clear();
         display.full_refresh();
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        log::info!(
-            "QTFB display initialized: {}x{} RGB888",
-            RMPP_WIDTH,
-            RMPP_HEIGHT
-        );
+        log::info!("QTFB display initialized: {}x{} RGB888", width, height);
         display
     }
 
@@ -266,6 +337,19 @@ impl QtfbDisplay {
 
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    pub fn device(&self) -> DeviceKind {
+        self.device
+    }
+
+    pub fn display_info(&self) -> DisplayInfo {
+        DisplayInfo {
+            width: self.width,
+            height: self.height,
+            device: self.device,
+            ui_scale: self.device.ui_scale(),
+        }
     }
 
     fn buffer_mut(&mut self) -> &mut [u8] {

@@ -4,7 +4,9 @@ use crate::canvas::{color, mxcfb_rect, Canvas, Point2, Vector2};
 use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 
-const HEADER_HEIGHT: u32 = 120;
+fn header_height() -> u32 {
+    crate::scale_u32(120)
+}
 const ROW_HEIGHT: u32 = 80;
 const MARGIN: u32 = 60;
 
@@ -65,6 +67,7 @@ impl Scene for SettingsScene {
         let dw = canvas.display_width();
 
         // === Header ===
+        let hdr = header_height();
         canvas.fill_rect(
             Point2 {
                 x: Some(0),
@@ -72,36 +75,38 @@ impl Scene for SettingsScene {
             },
             Vector2 {
                 x: dw,
-                y: HEADER_HEIGHT,
+                y: hdr,
             },
             color::HEADER_BG,
         );
 
+        let back_pad = crate::scale_u32(20);
         self.back_hitbox = canvas.draw_text_colored(
             Point2 {
                 x: 40.0,
-                y: 30.0,
+                y: crate::scale_f32(30.0),
             },
             self.strings.back,
-            42.0,
+            crate::scale_f32(42.0),
             color::WHITE,
         );
-        self.back_hitbox.width += 20;
-        self.back_hitbox.height += 20;
+        self.back_hitbox.width += back_pad;
+        self.back_hitbox.height += back_pad;
 
         let title = self.strings.cals_to_see;
-        let tr = canvas.measure_text(title, 46.0);
+        let title_font = crate::scale_f32(46.0);
+        let tr = canvas.measure_text(title, title_font);
         let tx = (dw as f32 - tr.width as f32) / 2.0;
         canvas.draw_text_colored(
-            Point2 { x: tx, y: 30.0 },
+            Point2 { x: tx, y: crate::scale_f32(30.0) },
             title,
-            46.0,
+            title_font,
             color::WHITE,
         );
 
         // === Calendar list ===
         self.cal_hitboxes.clear();
-        let mut y = HEADER_HEIGHT + 20;
+        let mut y = hdr + 20;
         let mut current_server = String::new();
 
         for cal in &self.calendars {

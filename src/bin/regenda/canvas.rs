@@ -26,6 +26,10 @@ impl Canvas {
         self.display.height()
     }
 
+    pub fn display_info(&self) -> crate::rmpp_hal::types::DisplayInfo {
+        self.display.display_info()
+    }
+
     pub fn clear(&mut self) {
         self.display.clear();
     }

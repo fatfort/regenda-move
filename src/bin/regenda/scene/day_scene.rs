@@ -5,7 +5,13 @@ use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
-const HEADER_HEIGHT: u32 = 120;
+// Header scales with the device (74 on Move, 120 on Ferrari) so the
+// per-device top-bar height matches the move-branch hand-tuned values.
+// The other vertical bands stay native — they're sized for physical buttons,
+// not display-relative content.
+fn header_height() -> u32 {
+    crate::scale_u32(120)
+}
 const STALE_BANNER_HEIGHT: u32 = 50;
 const NAV_HEIGHT: u32 = 100;
 const BOTTOM_HEIGHT: u32 = 100;
@@ -53,7 +59,7 @@ impl DayScene {
         stale_since: Option<DateTime<Utc>>,
     ) -> Self {
         let events = filter_events(all_events, date, &calendars, &tz);
-        let list_height = 2160 - HEADER_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
+        let list_height = crate::display_height() - header_height() - NAV_HEIGHT - BOTTOM_HEIGHT;
         let events_per_page = (list_height / EVENT_ROW_HEIGHT) as usize;
 
         DayScene {
@@ -184,6 +190,7 @@ impl Scene for DayScene {
         let dw = canvas.display_width();
 
         // === Header ===
+        let hdr = header_height();
         canvas.fill_rect(
             Point2 {
                 x: Some(0),
@@ -191,7 +198,7 @@ impl Scene for DayScene {
             },
             Vector2 {
                 x: dw,
-                y: HEADER_HEIGHT,
+                y: hdr,
             },
             color::HEADER_BG,
         );
@@ -219,38 +226,41 @@ impl Scene for DayScene {
         canvas.draw_text_colored(
             Point2 {
                 x: MARGIN as f32,
-                y: 25.0,
+                y: crate::scale_f32(25.0),
             },
             &date_display,
-            52.0,
+            crate::scale_f32(52.0),
             color::WHITE,
         );
 
         // Settings button (top right)
+        let btn_font = crate::scale_f32(36.0);
+        let btn_y = crate::scale_f32(35.0);
+        let btn_pad = crate::scale_u32(20);
         let settings_text = self.strings.settings;
-        let settings_rect = canvas.measure_text(settings_text, 36.0);
+        let settings_rect = canvas.measure_text(settings_text, btn_font);
         let sx = dw as f32 - settings_rect.width as f32 - MARGIN as f32;
         self.settings_hitbox = canvas.draw_text_colored(
-            Point2 { x: sx, y: 35.0 },
+            Point2 { x: sx, y: btn_y },
             settings_text,
-            36.0,
+            btn_font,
             color::WHITE,
         );
-        self.settings_hitbox.width += 20;
-        self.settings_hitbox.height += 20;
+        self.settings_hitbox.width += btn_pad;
+        self.settings_hitbox.height += btn_pad;
 
         // Refresh button
         let refresh_text = self.strings.refresh;
-        let refresh_rect = canvas.measure_text(refresh_text, 36.0);
-        let rx = sx - refresh_rect.width as f32 - 40.0;
+        let refresh_rect = canvas.measure_text(refresh_text, btn_font);
+        let rx = sx - refresh_rect.width as f32 - crate::scale_f32(40.0);
         self.refresh_hitbox = canvas.draw_text_colored(
-            Point2 { x: rx, y: 35.0 },
+            Point2 { x: rx, y: btn_y },
             refresh_text,
-            36.0,
+            btn_font,
             color::WHITE,
         );
-        self.refresh_hitbox.width += 20;
-        self.refresh_hitbox.height += 20;
+        self.refresh_hitbox.width += btn_pad;
+        self.refresh_hitbox.height += btn_pad;
 
         // Stale banner (offline cache). Rendered as a slim strip directly
         // below the header with a light background. Events shift down by
@@ -272,7 +282,7 @@ impl Scene for DayScene {
             canvas.fill_rect(
                 Point2 {
                     x: Some(0),
-                    y: Some(HEADER_HEIGHT as i32),
+                    y: Some(hdr as i32),
                 },
                 Vector2 {
                     x: dw,
@@ -283,7 +293,7 @@ impl Scene for DayScene {
             canvas.draw_text_colored(
                 Point2 {
                     x: MARGIN as f32,
-                    y: (HEADER_HEIGHT + 8) as f32,
+                    y: (hdr + 8) as f32,
                 },
                 &banner,
                 30.0,
@@ -292,8 +302,8 @@ impl Scene for DayScene {
         }
 
         // === Event list ===
-        let list_top = HEADER_HEIGHT + stale_banner_h;
-        let list_bottom = crate::DISPLAY_HEIGHT - NAV_HEIGHT - BOTTOM_HEIGHT;
+        let list_top = hdr + stale_banner_h;
+        let list_bottom = crate::display_height() - NAV_HEIGHT - BOTTOM_HEIGHT;
         self.event_hitboxes.clear();
 
         if self.events.is_empty() {
@@ -365,7 +375,7 @@ impl Scene for DayScene {
                         y: (y + 20) as f32,
                     },
                     &event.summary,
-                    42.0,
+                    crate::scale_f32(42.0),
                     color::BLACK,
                 );
 
@@ -447,7 +457,7 @@ impl Scene for DayScene {
         }
 
         // === Navigation bar ===
-        let nav_y = (2160 - NAV_HEIGHT - BOTTOM_HEIGHT) as i32;
+        let nav_y = (crate::display_height() - NAV_HEIGHT - BOTTOM_HEIGHT) as i32;
 
         // Divider
         canvas.fill_rect(
@@ -523,7 +533,7 @@ impl Scene for DayScene {
         };
 
         // === Bottom bar ===
-        let bottom_y = (2160 - BOTTOM_HEIGHT) as i32;
+        let bottom_y = (crate::display_height() - BOTTOM_HEIGHT) as i32;
         canvas.fill_rect(
             Point2 {
                 x: Some(0),

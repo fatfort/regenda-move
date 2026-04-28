@@ -6,10 +6,14 @@ use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 use chrono::{Datelike, NaiveDate};
 use std::collections::HashSet;
 
-const HEADER_HEIGHT: u32 = 120;
+fn header_height() -> u32 {
+    crate::scale_u32(120)
+}
 const DOW_HEIGHT: u32 = 60;
 const MARGIN: u32 = 40;
-const GRID_TOP: u32 = HEADER_HEIGHT + DOW_HEIGHT;
+fn grid_top() -> u32 {
+    header_height() + DOW_HEIGHT
+}
 
 pub struct MonthScene {
     pub selected_date: Option<NaiveDate>,
@@ -108,6 +112,7 @@ impl Scene for MonthScene {
             .collect();
 
         // === Header ===
+        let hdr = header_height();
         canvas.fill_rect(
             Point2 {
                 x: Some(0),
@@ -115,49 +120,55 @@ impl Scene for MonthScene {
             },
             Vector2 {
                 x: dw,
-                y: HEADER_HEIGHT,
+                y: hdr,
             },
             color::HEADER_BG,
         );
 
         // Back button
+        let back_pad = crate::scale_u32(20);
         self.back_hitbox = canvas.draw_text_colored(
             Point2 {
                 x: MARGIN as f32,
-                y: 30.0,
+                y: crate::scale_f32(30.0),
             },
             self.strings.back,
-            42.0,
+            crate::scale_f32(42.0),
             color::WHITE,
         );
-        self.back_hitbox.width += 20;
-        self.back_hitbox.height += 20;
+        self.back_hitbox.width += back_pad;
+        self.back_hitbox.height += back_pad;
 
         // Month/Year title
         let month_name = self.strings.months[(self.current_month - 1) as usize];
         let title = format!("< {} {} >", month_name, self.current_year);
-        let tr = canvas.measure_text(&title, 52.0);
+        let title_font = crate::scale_f32(52.0);
+        let tr = canvas.measure_text(&title, title_font);
         let tx = (dw as f32 - tr.width as f32) / 2.0;
         canvas.draw_text_colored(
-            Point2 { x: tx, y: 25.0 },
+            Point2 { x: tx, y: crate::scale_f32(25.0) },
             &title,
-            52.0,
+            title_font,
             color::WHITE,
         );
 
-        // Month navigation hitboxes
+        // Month navigation hitboxes (sized so prev/next chevrons line up
+        // with the "<" / ">" glyphs of the title at the current scale).
         let center = dw / 2;
+        let nav_offset = crate::scale_u32(250);
+        let nav_offset2 = crate::scale_u32(150);
+        let nav_w = crate::scale_u32(100);
         self.prev_month_hitbox = mxcfb_rect {
             top: 0,
-            left: center - 250,
-            width: 100,
-            height: HEADER_HEIGHT,
+            left: center - nav_offset,
+            width: nav_w,
+            height: hdr,
         };
         self.next_month_hitbox = mxcfb_rect {
             top: 0,
-            left: center + 150,
-            width: 100,
-            height: HEADER_HEIGHT,
+            left: center + nav_offset2,
+            width: nav_w,
+            height: hdr,
         };
 
         // === Day of week headers ===
@@ -168,7 +179,7 @@ impl Scene for MonthScene {
             canvas.draw_text_colored(
                 Point2 {
                     x: (x as f32 - dr.width as f32 / 2.0),
-                    y: (HEADER_HEIGHT + 15) as f32,
+                    y: (hdr + 15) as f32,
                 },
                 dow,
                 32.0,
@@ -193,10 +204,10 @@ impl Scene for MonthScene {
             let row = cell_idx / 7;
 
             let cx = MARGIN + col as u32 * cell_w + cell_w / 2;
-            let cy = GRID_TOP + row as u32 * cell_h + cell_h / 2;
+            let cy = grid_top() + row as u32 * cell_h + cell_h / 2;
 
             let hitbox = mxcfb_rect {
-                top: GRID_TOP + row as u32 * cell_h,
+                top: grid_top() + row as u32 * cell_h,
                 left: MARGIN + col as u32 * cell_w,
                 width: cell_w,
                 height: cell_h,

@@ -302,11 +302,14 @@ impl Scene for OAuthScene {
             }
         }
 
-        // Cancel button (always visible)
+        // Cancel button (always visible). Anchored relative to the bottom
+        // of the display so it's reachable on Move (1696h) as well as
+        // Ferrari (2160h) — y=1800 is offscreen on Move.
+        let cancel_y = (crate::display_height() as i32) - 360;
         self.cancel_hitbox = canvas.draw_button(
             Point2 {
                 x: None,
-                y: Some(1800),
+                y: Some(cancel_y),
             },
             "Cancel",
             44.0,

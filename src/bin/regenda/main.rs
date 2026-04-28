@@ -16,16 +16,53 @@ use crate::caldav::{cache, FetchStatus};
 use crate::canvas::Canvas;
 use crate::config::Config;
 use crate::rmpp_hal::input::start_input_threads;
-use crate::rmpp_hal::types::InputEvent;
+use crate::rmpp_hal::types::{DeviceKind, DisplayInfo, InputEvent};
 use crate::scene::*;
 use chrono::{DateTime, Utc};
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 
-pub const DISPLAY_WIDTH: u32 = 1620;
-pub const DISPLAY_HEIGHT: u32 = 2160;
+/// Runtime-detected display info. Populated by `init_display_info` once the
+/// QTFB backend has detected the device. Scenes read it through the helper
+/// functions below to derive sizes, fonts, and layout.
+static DISPLAY_INFO: OnceLock<DisplayInfo> = OnceLock::new();
+
+pub fn init_display_info(info: DisplayInfo) {
+    let _ = DISPLAY_INFO.set(info);
+}
+
+fn display_info() -> DisplayInfo {
+    *DISPLAY_INFO.get().expect("display info not initialised")
+}
+
+pub fn display_width() -> u32 {
+    display_info().width
+}
+
+pub fn display_height() -> u32 {
+    display_info().height
+}
+
+pub fn ui_scale() -> f32 {
+    display_info().ui_scale
+}
+
+pub fn device_kind() -> DeviceKind {
+    display_info().device
+}
+
+/// Round `n` (rMPP-native pixels) by the runtime UI scale to give the
+/// device-correct equivalent. Matches the manual `(x * 7.3/11.8).round()`
+/// values from the move branch.
+pub fn scale_u32(n: u32) -> u32 {
+    (n as f32 * ui_scale()).round() as u32
+}
+
+pub fn scale_f32(f: f32) -> f32 {
+    f * ui_scale()
+}
 
 fn main() {
     if std::env::var("RUST_LOG").is_err() {
@@ -56,8 +93,9 @@ fn main() {
 
     info!("Timezone: {}, Language: {}", tz, config.language_str());
 
-    // Initialize display
+    // Initialize display (also populates DISPLAY_INFO for scene scaling)
     let mut canvas = Canvas::new();
+    init_display_info(canvas.display_info());
     let (input_tx, input_rx) = std::sync::mpsc::channel::<InputEvent>();
     start_input_threads(input_tx, canvas.qtfb_fd());
 
@@ -426,6 +464,7 @@ fn update(
 
 fn run_with_error(error: &str) {
     let mut canvas = Canvas::new();
+    init_display_info(canvas.display_info());
     let (input_tx, input_rx) = std::sync::mpsc::channel::<InputEvent>();
     start_input_threads(input_tx, canvas.qtfb_fd());
 
@@ -453,7 +492,7 @@ fn run_with_error(error: &str) {
         canvas::color::BLACK,
     );
 
-    let hint = "Place config at /opt/etc/reGenda/config.yml";
+    let hint = "Place config at /home/root/.config/reGenda/config.yml";
     let hr = canvas.measure_text(hint, 36.0);
     let hx = (dw as f32 - hr.width as f32) / 2.0;
     canvas.draw_text_colored(

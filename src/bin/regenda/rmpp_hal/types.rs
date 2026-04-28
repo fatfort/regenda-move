@@ -1,6 +1,47 @@
 pub use cgmath::{vec2, Point2, Vector2};
 pub use image;
 
+/// Which reMarkable device the binary is currently running on. Detected once
+/// at startup from `/sys/devices/soc0/machine`, the device-tree model, and
+/// `gethostname()`. Determines display dimensions, the QTFB INIT path, and
+/// the UI scale factor.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    /// reMarkable Paper Pro (11.8", 1620×2160). Hostname `imx8mm-ferrari`.
+    Ferrari,
+    /// reMarkable Paper Pro Move (7.3", 954×1696). Hostname `imx93-chiappa`.
+    Move,
+}
+
+impl DeviceKind {
+    pub fn dims(self) -> (u32, u32) {
+        match self {
+            DeviceKind::Ferrari => (1620, 2160),
+            DeviceKind::Move => (954, 1696),
+        }
+    }
+
+    /// UI scale factor relative to the rMPP-native (Ferrari) sizes. Move's
+    /// physical screen is 7.3"/11.8" the diagonal of Ferrari's, so we scale
+    /// every native pixel size by that ratio to keep the UI proportional.
+    pub fn ui_scale(self) -> f32 {
+        match self {
+            DeviceKind::Ferrari => 1.0,
+            DeviceKind::Move => 7.3 / 11.8,
+        }
+    }
+}
+
+/// Runtime display info populated once `QtfbDisplay` has detected and
+/// initialised the device.
+#[derive(Copy, Clone, Debug)]
+pub struct DisplayInfo {
+    pub width: u32,
+    pub height: u32,
+    pub device: DeviceKind,
+    pub ui_scale: f32,
+}
+
 /// Rectangle region on display (mirrors libremarkable's mxcfb_rect).
 #[derive(Copy, Clone, Debug, Default)]
 pub struct mxcfb_rect {

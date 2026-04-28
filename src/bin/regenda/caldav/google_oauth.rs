@@ -90,7 +90,7 @@ pub fn poll_for_token(
 ) -> Result<Option<TokenResponse>> {
     let client = oauth_client();
 
-    let resp = client
+    let resp = match client
         .post(GOOGLE_TOKEN_URL)
         .form(&[
             ("client_id", client_id),
@@ -99,10 +99,24 @@ pub fn poll_for_token(
             ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
         ])
         .send()
-        .context("Failed to poll for token")?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Treat transient network errors as "still pending" so WiFi blips
+            // during device-auth polling don't abort the whole flow.
+            log::warn!("Transient poll error, retrying: {e}");
+            return Ok(None);
+        }
+    };
 
     let status = resp.status();
-    let body = resp.text().context("Failed to read token response")?;
+    let body = match resp.text() {
+        Ok(b) => b,
+        Err(e) => {
+            log::warn!("Transient poll read error, retrying: {e}");
+            return Ok(None);
+        }
+    };
 
     if status.is_success() {
         let token: TokenResponse =
