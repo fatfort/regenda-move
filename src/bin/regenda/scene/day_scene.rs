@@ -335,6 +335,20 @@ impl Scene for DayScene {
                 };
                 self.event_hitboxes.push(hitbox);
 
+                // Per-calendar color stripe on the left edge
+                let stripe_color = event.calendar_color.unwrap_or(color::DARK_GRAY);
+                canvas.fill_rect(
+                    Point2 {
+                        x: Some(8),
+                        y: Some((y + 6) as i32),
+                    },
+                    Vector2 {
+                        x: 10,
+                        y: EVENT_ROW_HEIGHT - 12,
+                    },
+                    stripe_color,
+                );
+
                 // Time column
                 let time_str = if event.all_day {
                     self.strings.allday.to_string()

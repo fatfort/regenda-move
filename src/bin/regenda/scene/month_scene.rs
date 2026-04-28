@@ -4,7 +4,7 @@ use crate::canvas::{color, mxcfb_rect, Canvas, Point2, Vector2};
 use crate::i18n::Strings;
 use crate::rmpp_hal::types::{InputEvent, MultitouchEvent};
 use chrono::{Datelike, NaiveDate};
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 fn header_height() -> u32 {
     crate::scale_u32(120)
@@ -104,12 +104,16 @@ impl Scene for MonthScene {
         let dw = canvas.display_width();
         let today = chrono::Local::now().date_naive();
 
-        // Collect dates that have events
-        let event_dates: HashSet<NaiveDate> = self
-            .events
-            .iter()
-            .map(|e| e.date_in_tz(&self.tz))
-            .collect();
+        // Collect distinct calendar colors per date (for per-event dots)
+        let mut date_colors: HashMap<NaiveDate, Vec<color>> = HashMap::new();
+        for event in &self.events {
+            let d = event.date_in_tz(&self.tz);
+            let c = event.calendar_color.unwrap_or(color::DARK_GRAY);
+            let entry = date_colors.entry(d).or_insert_with(Vec::new);
+            if !entry.contains(&c) {
+                entry.push(c);
+            }
+        }
 
         // === Header ===
         let hdr = header_height();
@@ -239,9 +243,22 @@ impl Scene for MonthScene {
                 text_color,
             );
 
-            // Event dot
-            if event_dates.contains(&date) && date != today {
-                canvas.fill_circle(cx as i32, (cy + 30) as i32, 5, color::ACCENT);
+            // Per-calendar event dots (one dot per distinct calendar, capped at 3)
+            if date != today {
+                if let Some(colors) = date_colors.get(&date) {
+                    let n = colors.len().min(3) as i32;
+                    let spacing: i32 = 14;
+                    let total_w = (n - 1) * spacing;
+                    let start_x = cx as i32 - total_w / 2;
+                    for (i, c) in colors.iter().take(n as usize).enumerate() {
+                        canvas.fill_circle(
+                            start_x + i as i32 * spacing,
+                            (cy + 30) as i32,
+                            5,
+                            *c,
+                        );
+                    }
+                }
             }
         }
 

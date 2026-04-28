@@ -92,6 +92,20 @@ impl Scene for EventScene {
             color::WHITE,
         );
 
+        // Per-calendar color accent strip (sits in the gap below the header)
+        let accent_color = self.event.calendar_color.unwrap_or(color::DARK_GRAY);
+        canvas.fill_rect(
+            Point2 {
+                x: Some(0),
+                y: Some(header_height() as i32),
+            },
+            Vector2 {
+                x: dw,
+                y: 14,
+            },
+            accent_color,
+        );
+
         // === Content ===
         let mut y = CONTENT_TOP as f32;
 
