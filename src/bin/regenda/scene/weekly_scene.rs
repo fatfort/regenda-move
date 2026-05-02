@@ -44,6 +44,7 @@ pub struct WeeklyScene {
     pub go_to_event: Option<usize>,
     pub go_to_settings: bool,
     pub go_to_month: bool,
+    pub go_to_create: bool,
     pub refresh_pressed: bool,
     pub exit_pressed: bool,
     pub stale_since: Option<DateTime<Utc>>,
@@ -57,6 +58,7 @@ pub struct WeeklyScene {
     month_hitbox: mxcfb_rect,
     settings_hitbox: mxcfb_rect,
     refresh_hitbox: mxcfb_rect,
+    plus_hitbox: mxcfb_rect,
     day_header_hitboxes: Vec<(NaiveDate, mxcfb_rect)>,
     event_hitboxes: Vec<(usize, mxcfb_rect)>,
     needs_redraw: bool,
@@ -83,6 +85,7 @@ impl WeeklyScene {
             go_to_event: None,
             go_to_settings: false,
             go_to_month: false,
+            go_to_create: false,
             refresh_pressed: false,
             exit_pressed: false,
             stale_since,
@@ -95,6 +98,7 @@ impl WeeklyScene {
             month_hitbox: mxcfb_rect::default(),
             settings_hitbox: mxcfb_rect::default(),
             refresh_hitbox: mxcfb_rect::default(),
+            plus_hitbox: mxcfb_rect::default(),
             day_header_hitboxes: Vec::new(),
             event_hitboxes: Vec::new(),
             needs_redraw: true,
@@ -167,6 +171,8 @@ impl Scene for WeeklyScene {
                 self.go_to_settings = true;
             } else if Canvas::is_hitting(pos, self.refresh_hitbox) {
                 self.refresh_pressed = true;
+            } else if Canvas::is_hitting(pos, self.plus_hitbox) {
+                self.go_to_create = true;
             } else {
                 for (idx, hitbox) in &self.event_hitboxes {
                     if Canvas::is_hitting(pos, *hitbox) {
@@ -259,6 +265,20 @@ impl Scene for WeeklyScene {
         );
         self.refresh_hitbox.width += btn_pad;
         self.refresh_hitbox.height += btn_pad;
+
+        // + (new event) button
+        let plus_text = self.strings.plus;
+        let plus_font = crate::scale_f32(46.0);
+        let plus_rect = canvas.measure_text(plus_text, plus_font);
+        let px = rx - plus_rect.width as f32 - crate::scale_f32(40.0);
+        self.plus_hitbox = canvas.draw_text_colored(
+            Point2 { x: px, y: crate::scale_f32(28.0) },
+            plus_text,
+            plus_font,
+            color::WHITE,
+        );
+        self.plus_hitbox.width += btn_pad;
+        self.plus_hitbox.height += btn_pad;
 
         // === Stale banner ===
         let stale_h = if self.stale_since.is_some() {

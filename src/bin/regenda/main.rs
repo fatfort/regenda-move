@@ -413,6 +413,18 @@ fn update(
                 *current_stale_since,
             ));
         }
+        if day.go_to_create {
+            let writable = writable_calendars(config, all_calendars);
+            if !writable.is_empty() {
+                return Box::new(EditEventScene::new(
+                    EditMode::Create,
+                    writable,
+                    day.current_date,
+                    strings,
+                    tz,
+                ));
+            }
+        }
         if day.go_to_settings {
             return Box::new(SettingsScene::new(
                 all_calendars.clone(),
@@ -488,6 +500,90 @@ fn update(
                 *current_stale_since,
             );
         }
+        if event_scene.edit_pressed {
+            let writable = writable_calendars(config, all_calendars);
+            return Box::new(EditEventScene::new(
+                EditMode::Edit(event_scene.event.clone()),
+                writable,
+                event_scene.event.date_in_tz(&tz),
+                strings,
+                tz,
+            ));
+        }
+        if event_scene.delete_confirmed {
+            if let (Some(cal_id), Some(event_id)) = (
+                event_scene.event.source_calendar_id.clone(),
+                event_scene.event.source_event_id.clone(),
+            ) {
+                let status_clone = fetch_status.clone();
+                let config_clone = config.clone();
+                *fetch_status.lock().unwrap() = FetchStatus::Loading {
+                    message: strings.deleting.to_string(),
+                };
+                std::thread::spawn(move || {
+                    if let Err(e) =
+                        caldav::delete_event(&config_clone, &cal_id, &event_id)
+                    {
+                        log::error!("Calendar v3 delete failed: {:?}", e);
+                        *status_clone.lock().unwrap() = FetchStatus::Error {
+                            message: format!("Delete failed: {}", e),
+                        };
+                        return;
+                    }
+                    let result = caldav::fetch_all(&config_clone);
+                    *status_clone.lock().unwrap() = result;
+                });
+                return Box::new(LoadingScene::new(fetch_status.clone(), strings));
+            }
+        }
+    }
+
+    // Edit/Create event scene transitions
+    if let Some(edit) = scene.downcast_ref::<EditEventScene>() {
+        if edit.cancel_pressed {
+            return build_top_scene(
+                *last_top_view,
+                all_events,
+                all_calendars.clone(),
+                strings,
+                tz,
+                *current_stale_since,
+            );
+        }
+        if let Some(req) = &edit.save_request {
+            let req_clone = req.clone();
+            let status_clone = fetch_status.clone();
+            let config_clone = config.clone();
+            *fetch_status.lock().unwrap() = FetchStatus::Loading {
+                message: strings.saving.to_string(),
+            };
+            std::thread::spawn(move || {
+                let outcome: anyhow::Result<()> = match &req_clone.mode {
+                    scene::SaveMode::Insert => caldav::insert_event(
+                        &config_clone,
+                        &req_clone.calendar_id,
+                        &req_clone.write,
+                    )
+                    .map(|_id| ()),
+                    scene::SaveMode::Patch { event_id } => caldav::patch_event(
+                        &config_clone,
+                        &req_clone.calendar_id,
+                        event_id,
+                        &req_clone.write,
+                    ),
+                };
+                if let Err(e) = outcome {
+                    log::error!("Calendar v3 write failed: {:?}", e);
+                    *status_clone.lock().unwrap() = FetchStatus::Error {
+                        message: format!("Save failed: {}", e),
+                    };
+                    return;
+                }
+                let result = caldav::fetch_all(&config_clone);
+                *status_clone.lock().unwrap() = result;
+            });
+            return Box::new(LoadingScene::new(fetch_status.clone(), strings));
+        }
     }
 
     // Weekly scene transitions
@@ -501,6 +597,18 @@ fn update(
                 tz,
                 *current_stale_since,
             ));
+        }
+        if week.go_to_create {
+            let writable = writable_calendars(config, all_calendars);
+            if !writable.is_empty() {
+                return Box::new(EditEventScene::new(
+                    EditMode::Create,
+                    writable,
+                    week.current_week_start,
+                    strings,
+                    tz,
+                ));
+            }
         }
         if let Some(idx) = week.go_to_event {
             if idx < week.events.len() {
@@ -583,6 +691,27 @@ fn update(
     }
 
     scene
+}
+
+/// Filter the in-memory calendar list down to ones the v3 write API can
+/// target — every Google source whose name appears in the live config. ICS
+/// sources and basic-auth CalDAV sources are excluded; the brief explicitly
+/// scopes writes to Google for v1.
+fn writable_calendars(
+    config: &Config,
+    all_calendars: &[caldav::CalendarInfo],
+) -> Vec<caldav::CalendarInfo> {
+    all_calendars
+        .iter()
+        .filter(|c| {
+            config
+                .sources
+                .get(&c.server_name)
+                .map(|s| s.is_google())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 fn run_with_error(error: &str) {

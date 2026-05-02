@@ -25,13 +25,36 @@ struct ParsedVEvent {
 }
 
 /// Parse iCalendar data, expand recurring events into instances, and return a
-/// flat list of events within `[now-7d, now+30d]`.
+/// flat list of events within `[window_start_date, window_end_date]`.
 pub fn parse_ical_events(
     ical_data: &str,
     calendar_name: &str,
     calendar_color: Option<color>,
     window_start_date: chrono::NaiveDate,
     window_end_date: chrono::NaiveDate,
+) -> Vec<Event> {
+    parse_ical_events_with_source(
+        ical_data,
+        calendar_name,
+        calendar_color,
+        window_start_date,
+        window_end_date,
+        None,
+        None,
+    )
+}
+
+/// Same as `parse_ical_events`, but stamps every produced event with the
+/// given Google `source_calendar_id` and `source_event_id` for write-API
+/// targeting. ICS callers pass `None`/`None`.
+pub fn parse_ical_events_with_source(
+    ical_data: &str,
+    calendar_name: &str,
+    calendar_color: Option<color>,
+    window_start_date: chrono::NaiveDate,
+    window_end_date: chrono::NaiveDate,
+    source_calendar_id: Option<&str>,
+    source_event_id: Option<&str>,
 ) -> Vec<Event> {
     let reader = std::io::BufReader::new(ical_data.as_bytes());
     let parser = IcalParser::new(reader);
@@ -89,6 +112,17 @@ pub fn parse_ical_events(
         // overrides only if they don't match any expanded instance. Since
         // `expand_recurrence` already substitutes overrides into the result,
         // skip this branch when a master existed.
+    }
+
+    if source_calendar_id.is_some() || source_event_id.is_some() {
+        for ev in out.iter_mut() {
+            if ev.source_calendar_id.is_none() {
+                ev.source_calendar_id = source_calendar_id.map(|s| s.to_string());
+            }
+            if ev.source_event_id.is_none() {
+                ev.source_event_id = source_event_id.map(|s| s.to_string());
+            }
+        }
     }
 
     out
@@ -331,6 +365,8 @@ fn parse_vevent(
             calendar_name: calendar_name.to_string(),
             calendar_color,
             all_day,
+            source_calendar_id: None,
+            source_event_id: None,
         },
         dtstart_tzid,
         rrule,

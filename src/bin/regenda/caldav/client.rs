@@ -2,14 +2,15 @@ use super::cache;
 use super::google_oauth;
 use super::ical;
 use super::parser;
-use super::types::{parse_hex_color, CalendarInfo, Event, FetchStatus};
+use super::types::{parse_hex_color, CalendarInfo, Event, EventWrite, FetchStatus};
 use crate::canvas::color;
 use crate::config::{Config, ServerConfig};
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use std::collections::HashSet;
 
 const GOOGLE_CALDAV_BASE: &str = "https://apidata.googleusercontent.com/caldav/v2";
+const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3/calendars";
 
 /// Fast offline detection: fail the TCP connect in 3s.
 const HTTP_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -347,7 +348,14 @@ fn fetch_google(
 
         // Google CalDAV: PROPFIND with calendar-data is the working method
         // (REPORT always returns 403)
-        match fetch_google_events_propfind(&client, &cal_events_url, &auth, &cal_name, cal_color) {
+        match fetch_google_events_propfind(
+            &client,
+            &cal_events_url,
+            &auth,
+            &cal_name,
+            cal_color,
+            cal_id,
+        ) {
             Ok(events) => {
                 log::info!(
                     "Google: fetched {} events from '{}'",
@@ -362,7 +370,14 @@ fn fetch_google(
                     cal_name,
                     e
                 );
-                match fetch_google_events_get(&client, &cal_events_url, &auth, &cal_name, cal_color) {
+                match fetch_google_events_get(
+                    &client,
+                    &cal_events_url,
+                    &auth,
+                    &cal_name,
+                    cal_color,
+                    cal_id,
+                ) {
                     Ok(events) => {
                         log::info!(
                             "Google GET fallback: fetched {} events from '{}'",
@@ -539,7 +554,29 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8(result).unwrap_or_else(|_| input.to_string())
 }
 
+/// Extract Google's opaque event ID from a CalDAV `.ics` href.
+///
+/// Hrefs from PROPFIND look like `/caldav/v2/{calId}/events/{eventId}.ics`.
+/// We grab the last path segment and strip `.ics`. Returns `None` for the
+/// collection itself (path ends with `events/`) or if the segment is empty.
+///
+/// Important: the iCal `UID` is NOT a guaranteed 1:1 mapping with Google's
+/// event ID, so we go through the href instead of slicing the UID.
+fn event_id_from_href(href: &str) -> Option<String> {
+    let trimmed = href.trim_end_matches('/');
+    let last = trimmed.rsplit('/').next()?;
+    if last.is_empty() {
+        return None;
+    }
+    let stem = last.strip_suffix(".ics").unwrap_or(last);
+    if stem.is_empty() {
+        return None;
+    }
+    Some(percent_decode(stem))
+}
+
 /// Fetch Google events via calendar-query REPORT.
+#[allow(dead_code)]
 fn fetch_google_events(
     client: &reqwest::blocking::Client,
     calendar_url: &str,
@@ -606,6 +643,7 @@ fn fetch_google_events_propfind(
     auth: &Auth,
     calendar_name: &str,
     cal_color: Option<color>,
+    source_cal_id: &str,
 ) -> Result<Vec<Event>> {
     let propfind_xml = r#"<?xml version="1.0" encoding="utf-8"?>
 <d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
@@ -641,7 +679,14 @@ fn fetch_google_events_propfind(
     if !status.is_success() && status.as_u16() != 207 {
         // If PROPFIND with calendar-data doesn't work, try GET on individual resources
         log::debug!("PROPFIND with calendar-data failed, trying resource listing + GET");
-        return fetch_google_events_get(client, calendar_url, auth, calendar_name, cal_color);
+        return fetch_google_events_get(
+            client,
+            calendar_url,
+            auth,
+            calendar_name,
+            cal_color,
+            source_cal_id,
+        );
     }
 
     let parsed = parser::parse_report_events(&body)?;
@@ -659,12 +704,15 @@ fn fetch_google_events_propfind(
         if item.ical_data.is_empty() {
             continue;
         }
-        let mut parsed_events = ical::parse_ical_events(
+        let event_id = event_id_from_href(&item.href);
+        let mut parsed_events = ical::parse_ical_events_with_source(
             &item.ical_data,
             calendar_name,
             cal_color,
             range_start,
             range_end,
+            Some(source_cal_id),
+            event_id.as_deref(),
         );
         events.append(&mut parsed_events);
     }
@@ -679,6 +727,7 @@ fn fetch_google_events_get(
     auth: &Auth,
     calendar_name: &str,
     cal_color: Option<color>,
+    source_cal_id: &str,
 ) -> Result<Vec<Event>> {
     // Simple PROPFIND to list resources
     let propfind_xml = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -726,18 +775,21 @@ fn fetch_google_events_get(
         let event_url = resolve_url(calendar_url, &cal.href);
         log::debug!("Google: GET {}", event_url);
 
+        let event_id = event_id_from_href(&cal.href);
         let mut get_req = client.get(&event_url);
         get_req = apply_auth(get_req, auth);
 
         if let Ok(resp) = get_req.send() {
             if resp.status().is_success() {
                 if let Ok(ical_data) = resp.text() {
-                    let mut parsed = ical::parse_ical_events(
+                    let mut parsed = ical::parse_ical_events_with_source(
                         &ical_data,
                         calendar_name,
                         cal_color,
                         start,
                         end,
+                        Some(source_cal_id),
+                        event_id.as_deref(),
                     );
                     events.append(&mut parsed);
                 }
@@ -1134,4 +1186,259 @@ mod urlencoding {
         }
         result
     }
+}
+
+// ---- Google Calendar v3 write API (create / update / delete) ----
+//
+// We deliberately use the v3 JSON API rather than CalDAV PUT/DELETE: Google's
+// CalDAV write surface has the same quirks as its REPORT (calendar-query),
+// and v3 is what `calendar.events` scope actually authorises in a clean way.
+
+/// Build the v3 JSON body for create/update.
+fn write_event_body(write: &EventWrite) -> serde_json::Value {
+    use serde_json::json;
+
+    let start_value = if write.all_day {
+        let date = Utc
+            .from_utc_datetime(&write.start.naive_utc())
+            .date_naive();
+        json!({ "date": date.format("%Y-%m-%d").to_string() })
+    } else {
+        // RFC 3339 with offset; Calendar v3 also accepts a separate timeZone
+        // field, which we send so it round-trips on edit.
+        let local = write.start.with_timezone(&Utc);
+        json!({
+            "dateTime": local.to_rfc3339(),
+            "timeZone": write.timezone,
+        })
+    };
+
+    // For all-day events Calendar v3 (and RFC 5545) treats `end.date` as
+    // exclusive. The caller supplies an *inclusive* end date; bump it by one.
+    let end_value = if write.all_day {
+        let end_inclusive = write
+            .end
+            .map(|e| Utc.from_utc_datetime(&e.naive_utc()).date_naive())
+            .unwrap_or_else(|| {
+                Utc.from_utc_datetime(&write.start.naive_utc()).date_naive()
+            });
+        let end_exclusive = end_inclusive + chrono::Duration::days(1);
+        json!({ "date": end_exclusive.format("%Y-%m-%d").to_string() })
+    } else {
+        match write.end {
+            Some(end) => json!({
+                "dateTime": end.with_timezone(&Utc).to_rfc3339(),
+                "timeZone": write.timezone,
+            }),
+            // Calendar v3 requires `end` even for point-in-time events; default
+            // to start + 1h so the event is well-formed.
+            None => {
+                let end = write.start + chrono::Duration::hours(1);
+                json!({
+                    "dateTime": end.with_timezone(&Utc).to_rfc3339(),
+                    "timeZone": write.timezone,
+                })
+            }
+        }
+    };
+
+    let mut obj = serde_json::Map::new();
+    obj.insert("summary".to_string(), json!(write.summary));
+    if let Some(loc) = &write.location {
+        obj.insert("location".to_string(), json!(loc));
+    }
+    if let Some(desc) = &write.description {
+        obj.insert("description".to_string(), json!(desc));
+    }
+    obj.insert("start".to_string(), start_value);
+    obj.insert("end".to_string(), end_value);
+    serde_json::Value::Object(obj)
+}
+
+fn v3_events_url(calendar_id: &str) -> String {
+    format!(
+        "{}/{}/events",
+        GOOGLE_CALENDAR_API_BASE,
+        urlencoding::encode(calendar_id)
+    )
+}
+
+fn v3_event_url(calendar_id: &str, event_id: &str) -> String {
+    format!(
+        "{}/{}/events/{}",
+        GOOGLE_CALENDAR_API_BASE,
+        urlencoding::encode(calendar_id),
+        urlencoding::encode(event_id)
+    )
+}
+
+/// Resolve a Google source's bearer token, or fail if the source isn't
+/// authorised yet. The UI layer should never reach a write helper without
+/// the source having a stored token, but if it does we surface a clear error.
+fn resolve_bearer_token(config: &Config, server_name: &str) -> Result<String> {
+    let server_config = config
+        .sources
+        .get(server_name)
+        .with_context(|| format!("source '{}' not in config", server_name))?;
+    if !server_config.is_google() {
+        bail!("source '{}' is not a Google source — writes only work for Google", server_name);
+    }
+    let client_id = server_config
+        .client_id
+        .clone()
+        .with_context(|| format!("source '{}' missing client_id", server_name))?;
+    let client_secret = server_config
+        .client_secret
+        .clone()
+        .with_context(|| format!("source '{}' missing client_secret", server_name))?;
+
+    match google_oauth::get_access_token(server_name, &client_id, &client_secret)? {
+        Some(token) => Ok(token),
+        None => bail!(
+            "source '{}' is not authorised — re-run OAuth flow",
+            server_name
+        ),
+    }
+}
+
+/// Find the configured Google source whose `calendar_id` list contains the
+/// given calendar_id. Used by Edit/Delete to pick the right token.
+fn find_source_for_calendar<'a>(config: &'a Config, calendar_id: &str) -> Option<&'a str> {
+    for (name, server) in &config.sources {
+        if !server.is_google() {
+            continue;
+        }
+        if let Some(ids) = &server.calendar_id {
+            if ids.iter().any(|id| id == calendar_id) {
+                return Some(name.as_str());
+            }
+        }
+    }
+    // Fallback: if the user has a single Google source configured, use it.
+    let google: Vec<&str> = config
+        .sources
+        .iter()
+        .filter(|(_, s)| s.is_google())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    if google.len() == 1 {
+        Some(google[0])
+    } else {
+        None
+    }
+}
+
+/// POST a new event to `{calendar_id}`. On success returns the new event ID
+/// from the API response so the caller can refresh the UI without waiting on
+/// the next CalDAV pull (in practice we still trigger a full re-fetch — the
+/// returned ID is mainly useful for logging).
+pub fn insert_event(
+    config: &Config,
+    calendar_id: &str,
+    write: &EventWrite,
+) -> Result<String> {
+    let server_name = find_source_for_calendar(config, calendar_id)
+        .with_context(|| format!("no Google source configured for calendar '{}'", calendar_id))?;
+    let token = resolve_bearer_token(config, server_name)?;
+
+    let url = v3_events_url(calendar_id);
+    let body = write_event_body(write);
+
+    let client = http_client()?;
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .with_context(|| format!("POST {} failed", url))?;
+
+    let status = resp.status();
+    let resp_body = resp.text().unwrap_or_default();
+    if !status.is_success() {
+        bail!(
+            "Calendar v3 insert returned {}: {}",
+            status,
+            resp_body.chars().take(500).collect::<String>()
+        );
+    }
+
+    // Extract `id` from the JSON response for diagnostics.
+    let parsed: serde_json::Value = serde_json::from_str(&resp_body)
+        .context("Failed to parse Calendar v3 insert response")?;
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)")
+        .to_string();
+    log::info!("Calendar v3 insert: created event {}", id);
+    Ok(id)
+}
+
+/// PATCH an existing event. Only fields present in `write` are mutated; the
+/// API merges with existing values for omitted fields.
+pub fn patch_event(
+    config: &Config,
+    calendar_id: &str,
+    event_id: &str,
+    write: &EventWrite,
+) -> Result<()> {
+    let server_name = find_source_for_calendar(config, calendar_id)
+        .with_context(|| format!("no Google source configured for calendar '{}'", calendar_id))?;
+    let token = resolve_bearer_token(config, server_name)?;
+
+    let url = v3_event_url(calendar_id, event_id);
+    let body = write_event_body(write);
+
+    let client = http_client()?;
+    let resp = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&body)?)
+        .send()
+        .with_context(|| format!("PATCH {} failed", url))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().unwrap_or_default();
+        bail!(
+            "Calendar v3 patch returned {}: {}",
+            status,
+            resp_body.chars().take(500).collect::<String>()
+        );
+    }
+    log::info!("Calendar v3 patch: updated event {}/{}", calendar_id, event_id);
+    Ok(())
+}
+
+/// DELETE an event. Returns Ok(()) on 204 (the documented success code).
+pub fn delete_event(
+    config: &Config,
+    calendar_id: &str,
+    event_id: &str,
+) -> Result<()> {
+    let server_name = find_source_for_calendar(config, calendar_id)
+        .with_context(|| format!("no Google source configured for calendar '{}'", calendar_id))?;
+    let token = resolve_bearer_token(config, server_name)?;
+
+    let url = v3_event_url(calendar_id, event_id);
+    let client = http_client()?;
+    let resp = client
+        .delete(&url)
+        .bearer_auth(&token)
+        .send()
+        .with_context(|| format!("DELETE {} failed", url))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let resp_body = resp.text().unwrap_or_default();
+        bail!(
+            "Calendar v3 delete returned {}: {}",
+            status,
+            resp_body.chars().take(500).collect::<String>()
+        );
+    }
+    log::info!("Calendar v3 delete: deleted event {}/{}", calendar_id, event_id);
+    Ok(())
 }

@@ -24,6 +24,15 @@ pub struct Event {
     pub calendar_name: String,
     pub calendar_color: Option<color>,
     pub all_day: bool,
+    /// Google calendar ID this event belongs to. `None` for ICS sources and
+    /// any event whose source identity couldn't be resolved (those are
+    /// surfaced as read-only in the UI — Edit/Delete are disabled).
+    #[serde(default)]
+    pub source_calendar_id: Option<String>,
+    /// Google's opaque event ID, distinct from the iCal `uid`. Required for
+    /// PATCH/DELETE on the v3 API. `None` for ICS or when not resolved.
+    #[serde(default)]
+    pub source_event_id: Option<String>,
 }
 
 /// Parse a hex color string like "#0B8043" or "#0B8043FF" into a color.
@@ -149,4 +158,30 @@ pub enum FetchStatus {
     /// One or more Google sources need OAuth device authorization, and no
     /// other source returned data. Kept for the "nothing to show at all" path.
     NeedsOAuth { server_names: Vec<String> },
+}
+
+/// Payload for create/update event writes against Google Calendar v3.
+///
+/// Times are stored in UTC; the `timezone` field carries the IANA zone the
+/// API should anchor them in (e.g. `"Australia/Sydney"`). For all-day events
+/// only the date portion of `start` (and `end`, if set) is sent; per RFC 5545
+/// the end date is exclusive on the wire, so callers should pass the
+/// inclusive end date and the helper will offset it.
+#[derive(Clone, Debug)]
+pub struct EventWrite {
+    pub summary: String,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub all_day: bool,
+    pub start: DateTime<Utc>,
+    pub end: Option<DateTime<Utc>>,
+    pub timezone: String,
+}
+
+/// Status of a pending API write (insert/patch/delete).
+#[derive(Clone, Debug)]
+pub enum WriteStatus {
+    Pending,
+    Done,
+    Error { message: String },
 }

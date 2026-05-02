@@ -5,7 +5,14 @@ use std::time::Duration;
 
 const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_CALDAV_SCOPE: &str = "https://www.googleapis.com/auth/calendar.readonly";
+// Read+write scope. The CRUD branch needs to insert/patch/delete via the
+// Calendar v3 API, which `calendar.events` (read+write on events of accessible
+// calendars) authorises. Switching from `calendar.readonly` invalidates every
+// previously stored refresh_token: Google won't broaden a refresh_token's
+// scope, so the next get_access_token call will fail to refresh and the
+// existing Ok(None) → OAuthScene path re-prompts the user to re-auth all
+// Google sources. Mention this in the deploy commit message.
+const GOOGLE_CALDAV_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
 
 const TOKEN_DIR: &str = "/home/root/.config/reGenda";
 

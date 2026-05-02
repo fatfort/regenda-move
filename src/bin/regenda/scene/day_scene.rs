@@ -27,6 +27,7 @@ pub struct DayScene {
     pub go_to_week: bool,
     pub go_to_settings: bool,
     pub go_to_event: Option<usize>,
+    pub go_to_create: bool,
     pub refresh_pressed: bool,
     pub exit_pressed: bool,
     /// `Some(t)` iff the currently-displayed events came from the on-disk
@@ -45,6 +46,7 @@ pub struct DayScene {
     week_hitbox: mxcfb_rect,
     settings_hitbox: mxcfb_rect,
     refresh_hitbox: mxcfb_rect,
+    plus_hitbox: mxcfb_rect,
     event_hitboxes: Vec<mxcfb_rect>,
     page_prev_hitbox: mxcfb_rect,
     page_next_hitbox: mxcfb_rect,
@@ -73,6 +75,7 @@ impl DayScene {
             go_to_week: false,
             go_to_settings: false,
             go_to_event: None,
+            go_to_create: false,
             refresh_pressed: false,
             exit_pressed: false,
             stale_since,
@@ -87,6 +90,7 @@ impl DayScene {
             week_hitbox: mxcfb_rect::default(),
             settings_hitbox: mxcfb_rect::default(),
             refresh_hitbox: mxcfb_rect::default(),
+            plus_hitbox: mxcfb_rect::default(),
             event_hitboxes: Vec::new(),
             page_prev_hitbox: mxcfb_rect::default(),
             page_next_hitbox: mxcfb_rect::default(),
@@ -160,6 +164,8 @@ impl Scene for DayScene {
                 self.go_to_settings = true;
             } else if Canvas::is_hitting(pos, self.refresh_hitbox) {
                 self.refresh_pressed = true;
+            } else if Canvas::is_hitting(pos, self.plus_hitbox) {
+                self.go_to_create = true;
             } else if Canvas::is_hitting(pos, self.page_prev_hitbox) && self.page > 0 {
                 self.page -= 1;
                 self.needs_redraw = true;
@@ -267,6 +273,20 @@ impl Scene for DayScene {
         );
         self.refresh_hitbox.width += btn_pad;
         self.refresh_hitbox.height += btn_pad;
+
+        // + (new event) button
+        let plus_text = self.strings.plus;
+        let plus_font = crate::scale_f32(46.0);
+        let plus_rect = canvas.measure_text(plus_text, plus_font);
+        let px = rx - plus_rect.width as f32 - crate::scale_f32(40.0);
+        self.plus_hitbox = canvas.draw_text_colored(
+            Point2 { x: px, y: crate::scale_f32(28.0) },
+            plus_text,
+            plus_font,
+            color::WHITE,
+        );
+        self.plus_hitbox.width += btn_pad;
+        self.plus_hitbox.height += btn_pad;
 
         // Stale banner (offline cache). Rendered as a slim strip directly
         // below the header with a light background. Events shift down by

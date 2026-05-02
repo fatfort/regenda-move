@@ -12,23 +12,41 @@ const CONTENT_TOP: u32 = 160;
 
 pub struct EventScene {
     pub back_pressed: bool,
-    event: Event,
+    pub edit_pressed: bool,
+    pub delete_confirmed: bool,
+    pub event: Event,
     strings: &'static Strings,
     tz: chrono_tz::Tz,
     back_hitbox: mxcfb_rect,
-    drawn: bool,
+    edit_hitbox: mxcfb_rect,
+    delete_hitbox: mxcfb_rect,
+    confirm_yes_hitbox: mxcfb_rect,
+    confirm_no_hitbox: mxcfb_rect,
+    delete_modal: bool,
+    needs_redraw: bool,
 }
 
 impl EventScene {
     pub fn new(event: Event, strings: &'static Strings, tz: chrono_tz::Tz) -> Self {
         EventScene {
             back_pressed: false,
+            edit_pressed: false,
+            delete_confirmed: false,
             event,
             strings,
             tz,
             back_hitbox: mxcfb_rect::default(),
-            drawn: false,
+            edit_hitbox: mxcfb_rect::default(),
+            delete_hitbox: mxcfb_rect::default(),
+            confirm_yes_hitbox: mxcfb_rect::default(),
+            confirm_no_hitbox: mxcfb_rect::default(),
+            delete_modal: false,
+            needs_redraw: true,
         }
+    }
+
+    fn writable(&self) -> bool {
+        self.event.source_calendar_id.is_some() && self.event.source_event_id.is_some()
     }
 }
 
@@ -38,17 +56,40 @@ impl Scene for EventScene {
             event: MultitouchEvent::Release { finger },
         } = event
         {
-            if Canvas::is_hitting(finger.pos, self.back_hitbox) {
+            let pos = finger.pos;
+            if self.delete_modal {
+                if Canvas::is_hitting(pos, self.confirm_yes_hitbox) {
+                    self.delete_confirmed = true;
+                    return;
+                }
+                if Canvas::is_hitting(pos, self.confirm_no_hitbox) {
+                    self.delete_modal = false;
+                    self.needs_redraw = true;
+                    return;
+                }
+                return;
+            }
+            if Canvas::is_hitting(pos, self.back_hitbox) {
                 self.back_pressed = true;
+                return;
+            }
+            if self.writable() && Canvas::is_hitting(pos, self.edit_hitbox) {
+                self.edit_pressed = true;
+                return;
+            }
+            if self.writable() && Canvas::is_hitting(pos, self.delete_hitbox) {
+                self.delete_modal = true;
+                self.needs_redraw = true;
+                return;
             }
         }
     }
 
     fn draw(&mut self, canvas: &mut Canvas) {
-        if self.drawn {
+        if !self.needs_redraw {
             return;
         }
-        self.drawn = true;
+        self.needs_redraw = false;
 
         canvas.clear();
         let dw = canvas.display_width();
@@ -238,6 +279,235 @@ impl Scene for EventScene {
             );
         }
 
+        // === Edit / Delete buttons (bottom bar) ===
+        let dh = crate::display_height();
+        let bottom_h = crate::scale_u32(120);
+        let bottom_y = (dh - bottom_h) as i32;
+        canvas.fill_rect(
+            Point2 {
+                x: Some(0),
+                y: Some(bottom_y),
+            },
+            Vector2 { x: dw, y: 2 },
+            color::LIGHT_GRAY,
+        );
+
+        let writable = self.writable();
+        let btn_font = crate::scale_f32(40.0);
+        let btn_y = (bottom_y + crate::scale_u32(35) as i32) as f32;
+
+        let half = (dw / 2) as i32;
+
+        // Edit button (left half)
+        let edit_color = if writable { color::BLACK } else { color::MEDIUM_GRAY };
+        let edit_text = self.strings.edit_event;
+        let er = canvas.measure_text(edit_text, btn_font);
+        let ex = (half as f32 - er.width as f32) / 2.0;
+        let edit_rect = canvas.draw_text_colored(
+            Point2 { x: ex, y: btn_y },
+            edit_text,
+            btn_font,
+            edit_color,
+        );
+        self.edit_hitbox = mxcfb_rect {
+            top: bottom_y as u32,
+            left: 0,
+            width: dw / 2,
+            height: bottom_h,
+        };
+        let _ = edit_rect;
+
+        // Vertical divider
+        canvas.fill_rect(
+            Point2 {
+                x: Some(half),
+                y: Some(bottom_y),
+            },
+            Vector2 { x: 1, y: bottom_h },
+            color::LIGHT_GRAY,
+        );
+
+        // Delete button (right half)
+        let delete_color = if writable { color::BLACK } else { color::MEDIUM_GRAY };
+        let delete_text = self.strings.delete_event;
+        let dr = canvas.measure_text(delete_text, btn_font);
+        let dx = half as f32 + (half as f32 - dr.width as f32) / 2.0;
+        canvas.draw_text_colored(
+            Point2 { x: dx, y: btn_y },
+            delete_text,
+            btn_font,
+            delete_color,
+        );
+        self.delete_hitbox = mxcfb_rect {
+            top: bottom_y as u32,
+            left: dw / 2,
+            width: dw / 2,
+            height: bottom_h,
+        };
+
+        if !writable {
+            // Show a small read-only hint above the bottom bar
+            let hint = self.strings.readonly_event;
+            let hr = canvas.measure_text(hint, crate::scale_f32(28.0));
+            let hx = (dw as f32 - hr.width as f32) / 2.0;
+            canvas.draw_text_colored(
+                Point2 {
+                    x: hx,
+                    y: (bottom_y - crate::scale_u32(40) as i32) as f32,
+                },
+                hint,
+                crate::scale_f32(28.0),
+                color::MEDIUM_GRAY,
+            );
+        }
+
+        if self.delete_modal {
+            self.draw_delete_modal(canvas);
+        }
+
         canvas.update_full();
+    }
+}
+
+impl EventScene {
+    fn draw_delete_modal(&mut self, canvas: &mut Canvas) {
+        let dw = canvas.display_width();
+        let dh = crate::display_height();
+
+        // Dim the background by drawing a translucent overlay (e-ink: just a
+        // light fill clipped to the edges so the modal is visually distinct).
+        let modal_w = (dw as f32 * 0.7) as u32;
+        let modal_h = crate::scale_u32(360);
+        let modal_x = (dw - modal_w) / 2;
+        let modal_y = (dh - modal_h) / 2;
+
+        canvas.fill_rect(
+            Point2 {
+                x: Some(modal_x as i32),
+                y: Some(modal_y as i32),
+            },
+            Vector2 { x: modal_w, y: modal_h },
+            color::WHITE,
+        );
+        canvas.draw_rect(
+            Point2 {
+                x: Some(modal_x as i32),
+                y: Some(modal_y as i32),
+            },
+            Vector2 { x: modal_w, y: modal_h },
+            4,
+        );
+
+        // Title
+        let title = self.strings.confirm_delete;
+        let tf = crate::scale_f32(46.0);
+        let tr = canvas.measure_text(title, tf);
+        canvas.draw_text_colored(
+            Point2 {
+                x: (modal_x + (modal_w - tr.width) / 2) as f32,
+                y: (modal_y + crate::scale_u32(40)) as f32,
+            },
+            title,
+            tf,
+            color::BLACK,
+        );
+
+        // Message
+        let msg = self.strings.delete_confirm_msg;
+        let mf = crate::scale_f32(34.0);
+        let mr = canvas.measure_text(msg, mf);
+        canvas.draw_text_colored(
+            Point2 {
+                x: (modal_x + (modal_w - mr.width) / 2) as f32,
+                y: (modal_y + crate::scale_u32(120)) as f32,
+            },
+            msg,
+            mf,
+            color::DARK_GRAY,
+        );
+
+        // Show event title underneath for confirmation
+        let snippet = if self.event.summary.len() > 40 {
+            format!("{}…", &self.event.summary.chars().take(40).collect::<String>())
+        } else {
+            self.event.summary.clone()
+        };
+        let sf = crate::scale_f32(32.0);
+        let sr = canvas.measure_text(&snippet, sf);
+        canvas.draw_text_colored(
+            Point2 {
+                x: (modal_x + (modal_w - sr.width) / 2) as f32,
+                y: (modal_y + crate::scale_u32(170)) as f32,
+            },
+            &snippet,
+            sf,
+            color::BLACK,
+        );
+
+        // Buttons
+        let btn_y = modal_y + modal_h - crate::scale_u32(90);
+        let btn_font = crate::scale_f32(38.0);
+        let btn_pad = crate::scale_u32(24);
+
+        // Cancel (No)
+        let no_text = self.strings.no;
+        let nr = canvas.measure_text(no_text, btn_font);
+        let no_x = modal_x + crate::scale_u32(60);
+        let mut no_rect = canvas.draw_text_colored(
+            Point2 {
+                x: no_x as f32,
+                y: btn_y as f32,
+            },
+            no_text,
+            btn_font,
+            color::BLACK,
+        );
+        no_rect.left = no_rect.left.saturating_sub(btn_pad);
+        no_rect.top = no_rect.top.saturating_sub(btn_pad / 2);
+        no_rect.width += 2 * btn_pad;
+        no_rect.height += btn_pad;
+        canvas.draw_rect(
+            Point2 {
+                x: Some(no_rect.left as i32),
+                y: Some(no_rect.top as i32),
+            },
+            Vector2 {
+                x: no_rect.width,
+                y: no_rect.height,
+            },
+            3,
+        );
+        self.confirm_no_hitbox = no_rect;
+        let _ = nr;
+
+        // Confirm (Yes)
+        let yes_text = self.strings.yes;
+        let yr = canvas.measure_text(yes_text, btn_font);
+        let yes_x = modal_x + modal_w - crate::scale_u32(60) - yr.width;
+        let mut yes_rect = canvas.draw_text_colored(
+            Point2 {
+                x: yes_x as f32,
+                y: btn_y as f32,
+            },
+            yes_text,
+            btn_font,
+            color::BLACK,
+        );
+        yes_rect.left = yes_rect.left.saturating_sub(btn_pad);
+        yes_rect.top = yes_rect.top.saturating_sub(btn_pad / 2);
+        yes_rect.width += 2 * btn_pad;
+        yes_rect.height += btn_pad;
+        canvas.draw_rect(
+            Point2 {
+                x: Some(yes_rect.left as i32),
+                y: Some(yes_rect.top as i32),
+            },
+            Vector2 {
+                x: yes_rect.width,
+                y: yes_rect.height,
+            },
+            3,
+        );
+        self.confirm_yes_hitbox = yes_rect;
     }
 }
