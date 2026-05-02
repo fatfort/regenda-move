@@ -30,6 +30,8 @@ pub fn parse_ical_events(
     ical_data: &str,
     calendar_name: &str,
     calendar_color: Option<color>,
+    window_start_date: chrono::NaiveDate,
+    window_end_date: chrono::NaiveDate,
 ) -> Vec<Event> {
     let reader = std::io::BufReader::new(ical_data.as_bytes());
     let parser = IcalParser::new(reader);
@@ -43,14 +45,11 @@ pub fn parse_ical_events(
         }
     }
 
-    // Match the date-based window used by `fetch_google_events_propfind` in
-    // client.rs: an event is in-range if its UTC *date* falls in
-    // `[today-7, today+30]`. Using calendar-date bounds (not raw datetime
-    // arithmetic) means a recurring 08:45-UTC instance on the boundary day
-    // still expands — otherwise we'd drop today-minus-7 morning events.
-    let today = Utc::now().date_naive();
-    let window_start_date = today - Duration::days(7);
-    let window_end_date = today + Duration::days(30);
+    // Date-based window comes from the caller. Google CalDAV uses ~30 days
+    // forward; `ics` feeds use ~365 — using the caller's range avoids
+    // dropping legitimately in-window events during recurrence expansion.
+    // Calendar-date bounds (not raw datetime arithmetic) so a recurring
+    // 08:45-UTC instance on the boundary day still expands.
     let window_start = Utc.from_utc_datetime(
         &window_start_date
             .and_time(NaiveTime::from_hms_opt(0, 0, 0).unwrap()),

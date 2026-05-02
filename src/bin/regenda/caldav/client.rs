@@ -586,7 +586,8 @@ fn fetch_google_events(
 
     let mut events = Vec::new();
     for item in &parsed {
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
+        let mut parsed_events =
+            ical::parse_ical_events(&item.ical_data, calendar_name, cal_color, start, end);
         log::debug!(
             "Google: parsed {} events from iCal data ({} bytes)",
             parsed_events.len(),
@@ -658,12 +659,13 @@ fn fetch_google_events_propfind(
         if item.ical_data.is_empty() {
             continue;
         }
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
-        // Filter to date range (PROPFIND doesn't support time-range like REPORT)
-        parsed_events.retain(|e| {
-            let d = e.start.date_naive();
-            d >= range_start && d <= range_end
-        });
+        let mut parsed_events = ical::parse_ical_events(
+            &item.ical_data,
+            calendar_name,
+            cal_color,
+            range_start,
+            range_end,
+        );
         events.append(&mut parsed_events);
     }
 
@@ -730,12 +732,13 @@ fn fetch_google_events_get(
         if let Ok(resp) = get_req.send() {
             if resp.status().is_success() {
                 if let Ok(ical_data) = resp.text() {
-                    let mut parsed = ical::parse_ical_events(&ical_data, calendar_name, cal_color);
-                    // Filter by date range
-                    parsed.retain(|e| {
-                        let d = e.start.date_naive();
-                        d >= start && d <= end
-                    });
+                    let mut parsed = ical::parse_ical_events(
+                        &ical_data,
+                        calendar_name,
+                        cal_color,
+                        start,
+                        end,
+                    );
                     events.append(&mut parsed);
                 }
             }
@@ -952,7 +955,8 @@ fn fetch_calendar_events_with_auth(
 
     let mut events = Vec::new();
     for item in &parsed {
-        let mut parsed_events = ical::parse_ical_events(&item.ical_data, calendar_name, cal_color);
+        let mut parsed_events =
+            ical::parse_ical_events(&item.ical_data, calendar_name, cal_color, start, end);
         events.append(&mut parsed_events);
     }
 
@@ -1010,18 +1014,13 @@ fn fetch_ics(
         server_name: server_name.to_string(),
     };
 
-    let mut events = ical::parse_ical_events(&ical_data, &cal_name, None);
-
     // ICS feeds are static files — we already downloaded everything, so there's
     // no reason to clamp hard like the CalDAV paths do. Use a wide window that
     // covers any reasonable navigation (a full academic year ahead, a quarter back).
     let now = Utc::now().date_naive();
     let range_start = now - Duration::days(90);
     let range_end = now + Duration::days(365);
-    events.retain(|e| {
-        let d = e.start.date_naive();
-        d >= range_start && d <= range_end
-    });
+    let events = ical::parse_ical_events(&ical_data, &cal_name, None, range_start, range_end);
 
     log::info!(
         "ICS {}: {} events in range",
