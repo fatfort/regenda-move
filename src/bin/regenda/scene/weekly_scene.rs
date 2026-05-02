@@ -309,14 +309,18 @@ impl Scene for WeeklyScene {
         self.day_header_hitboxes.clear();
         self.event_hitboxes.clear();
 
-        // Group events by date for fast per-row rendering.
+        // Group events by date — multi-day events appear under every day they span.
+        let week_end_inclusive = self.current_week_start + chrono::Duration::days(6);
         let mut events_by_date: std::collections::HashMap<NaiveDate, Vec<usize>> =
             std::collections::HashMap::new();
         for (i, ev) in self.events.iter().enumerate() {
-            events_by_date
-                .entry(ev.date_in_tz(&self.tz))
-                .or_insert_with(Vec::new)
-                .push(i);
+            let start = ev.date_in_tz(&self.tz).max(self.current_week_start);
+            let end = ev.end_date_in_tz(&self.tz).min(week_end_inclusive);
+            let mut d = start;
+            while d <= end {
+                events_by_date.entry(d).or_insert_with(Vec::new).push(i);
+                d += chrono::Duration::days(1);
+            }
         }
 
         for day_idx in 0..7u32 {
@@ -657,19 +661,21 @@ fn filter_week_events(
     calendars: &[CalendarInfo],
     tz: &chrono_tz::Tz,
 ) -> Vec<Event> {
-    let week_end = week_start + chrono::Duration::days(7);
+    let week_end_inclusive = week_start + chrono::Duration::days(6);
     let visible_cals: Vec<&str> = calendars
         .iter()
         .filter(|c| c.visible)
         .map(|c| c.name.as_str())
         .collect();
 
+    // Multi-day events count if they overlap any day in the week.
     let mut filtered: Vec<Event> = all_events
         .iter()
         .filter(|e| {
-            let d = e.date_in_tz(tz);
-            d >= week_start
-                && d < week_end
+            let start = e.date_in_tz(tz);
+            let end = e.end_date_in_tz(tz);
+            let overlaps = start <= week_end_inclusive && end >= week_start;
+            overlaps
                 && (visible_cals.is_empty() || visible_cals.contains(&e.calendar_name.as_str()))
         })
         .cloned()

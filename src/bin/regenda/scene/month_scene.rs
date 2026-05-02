@@ -104,14 +104,20 @@ impl Scene for MonthScene {
         let dw = canvas.display_width();
         let today = chrono::Local::now().date_naive();
 
-        // Collect distinct calendar colors per date (for per-event dots)
+        // Collect distinct calendar colors per date (for per-event dots).
+        // Multi-day events contribute their color to every day they span.
         let mut date_colors: HashMap<NaiveDate, Vec<color>> = HashMap::new();
         for event in &self.events {
-            let d = event.date_in_tz(&self.tz);
             let c = event.calendar_color.unwrap_or(color::DARK_GRAY);
-            let entry = date_colors.entry(d).or_insert_with(Vec::new);
-            if !entry.contains(&c) {
-                entry.push(c);
+            let start = event.date_in_tz(&self.tz);
+            let end = event.end_date_in_tz(&self.tz);
+            let mut d = start;
+            while d <= end {
+                let entry = date_colors.entry(d).or_insert_with(Vec::new);
+                if !entry.contains(&c) {
+                    entry.push(c);
+                }
+                d += chrono::Duration::days(1);
             }
         }
 

@@ -46,6 +46,33 @@ impl Event {
             .date_naive()
     }
 
+    /// Last date this event occupies in the given timezone. For point events
+    /// (no end), equals `date_in_tz`. For all-day events DTEND is exclusive
+    /// per RFC 5545, so we subtract one day. For datetime events DTEND is
+    /// inclusive, so we use the end date as-is.
+    pub fn end_date_in_tz(&self, tz: &chrono_tz::Tz) -> NaiveDate {
+        use chrono::TimeZone;
+        match self.end {
+            None => self.date_in_tz(tz),
+            Some(end) => {
+                let end_date = tz.from_utc_datetime(&end.naive_utc()).date_naive();
+                if self.all_day && end_date > self.date_in_tz(tz) {
+                    end_date - chrono::Duration::days(1)
+                } else {
+                    end_date
+                }
+            }
+        }
+    }
+
+    /// Whether this event is visible on `date` in the given timezone.
+    /// True for any date between start and end-date (inclusive).
+    pub fn spans_date(&self, date: NaiveDate, tz: &chrono_tz::Tz) -> bool {
+        let start = self.date_in_tz(tz);
+        let end = self.end_date_in_tz(tz);
+        date >= start && date <= end
+    }
+
     /// Format the start time as HH:MM in the given timezone.
     pub fn start_time_str(&self, tz: &chrono_tz::Tz) -> String {
         use chrono::TimeZone;

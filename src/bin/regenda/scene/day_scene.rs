@@ -633,7 +633,7 @@ fn filter_events(
     let mut filtered: Vec<Event> = all_events
         .iter()
         .filter(|e| {
-            e.date_in_tz(tz) == date
+            e.spans_date(date, tz)
                 && (visible_cals.is_empty() || visible_cals.contains(&e.calendar_name.as_str()))
         })
         .cloned()
