@@ -13,6 +13,44 @@ mod rmpp_hal;
 mod scene;
 
 use crate::caldav::{cache, FetchStatus};
+use chrono::NaiveDate;
+
+/// The most recently-shown top-level view (Day or Week). Sub-views like
+/// Event / Settings / Month return to this on back, instead of always
+/// resetting to today.
+#[derive(Clone, Copy)]
+enum TopView {
+    Day(NaiveDate),
+    Week(NaiveDate),
+}
+
+fn build_top_scene(
+    view: TopView,
+    all_events: &[caldav::Event],
+    all_calendars: Vec<caldav::CalendarInfo>,
+    strings: &'static i18n::Strings,
+    tz: chrono_tz::Tz,
+    stale_since: Option<DateTime<Utc>>,
+) -> Box<dyn Scene> {
+    match view {
+        TopView::Day(d) => Box::new(DayScene::new(
+            d,
+            all_events,
+            all_calendars,
+            strings,
+            tz,
+            stale_since,
+        )),
+        TopView::Week(s) => Box::new(WeeklyScene::new(
+            s,
+            all_events,
+            all_calendars,
+            strings,
+            tz,
+            stale_since,
+        )),
+    }
+}
 use crate::canvas::Canvas;
 use crate::config::Config;
 use crate::rmpp_hal::input::start_input_threads;
@@ -133,6 +171,10 @@ fn main() {
     // across restarts.
     let mut dismissed_oauth: HashSet<String> = HashSet::new();
 
+    // Tracks the user's last top-level view so sub-scenes return back to it
+    // on cancel/close instead of jumping to today.
+    let mut last_top_view: TopView = TopView::Day(chrono::Local::now().date_naive());
+
     // Always kick off a background refresh on startup — fresh data wins when
     // online; offline re-runs silently keep showing the cached snapshot.
     {
@@ -194,6 +236,7 @@ fn main() {
             &mut all_calendars,
             &mut current_stale_since,
             &mut dismissed_oauth,
+            &mut last_top_view,
         );
 
         let elapsed = before_input.elapsed().unwrap();
@@ -260,7 +303,18 @@ fn update(
     all_calendars: &mut Vec<caldav::CalendarInfo>,
     current_stale_since: &mut Option<DateTime<Utc>>,
     dismissed_oauth: &mut HashSet<String>,
+    last_top_view: &mut TopView,
 ) -> Box<dyn Scene> {
+    // Snapshot the current top-level view (Day or Week) every frame so that
+    // in-scene navigation (e.g. paging through days inside DayScene) is
+    // captured for "back" purposes — sub-scenes will return to this exact
+    // state instead of always jumping to today.
+    if let Some(day) = scene.downcast_ref::<DayScene>() {
+        *last_top_view = TopView::Day(day.current_date);
+    } else if let Some(week) = scene.downcast_ref::<WeeklyScene>() {
+        *last_top_view = TopView::Week(week.current_week_start);
+    }
+
     // Loading scene transitions
     if let Some(loading) = scene.downcast_ref::<LoadingScene>() {
         // OAuth takes precedence over DayScene transition: if any pending
@@ -291,15 +345,14 @@ fn update(
                 *all_events = events;
                 *current_stale_since = stale_since;
             }
-            let today = chrono::Local::now().date_naive();
-            return Box::new(DayScene::new(
-                today,
+            return build_top_scene(
+                *last_top_view,
                 all_events,
                 all_calendars.clone(),
                 strings,
                 tz,
                 *current_stale_since,
-            ));
+            );
         }
         if loading.retry_pressed {
             // Retry fetch
@@ -399,17 +452,17 @@ fn update(
     // Month scene transitions
     if let Some(month) = scene.downcast_ref::<MonthScene>() {
         if month.back_pressed {
-            let date = month
-                .selected_date
-                .unwrap_or(chrono::Local::now().date_naive());
-            return Box::new(DayScene::new(
-                date,
+            // Back returns to whichever top view (Day/Week) the user came from,
+            // ignoring any tap-selected date (selected_date is for forward
+            // navigation, handled below).
+            return build_top_scene(
+                *last_top_view,
                 all_events,
                 all_calendars.clone(),
                 strings,
                 tz,
                 *current_stale_since,
-            ));
+            );
         }
         if let Some(date) = month.selected_date {
             return Box::new(DayScene::new(
@@ -426,15 +479,14 @@ fn update(
     // Event scene transitions
     if let Some(event_scene) = scene.downcast_ref::<EventScene>() {
         if event_scene.back_pressed {
-            let today = chrono::Local::now().date_naive();
-            return Box::new(DayScene::new(
-                today,
+            return build_top_scene(
+                *last_top_view,
                 all_events,
                 all_calendars.clone(),
                 strings,
                 tz,
                 *current_stale_since,
-            ));
+            );
         }
     }
 
@@ -497,15 +549,14 @@ fn update(
         if settings.back_pressed {
             // Update calendar visibility
             *all_calendars = settings.calendars.clone();
-            let today = chrono::Local::now().date_naive();
-            return Box::new(DayScene::new(
-                today,
+            return build_top_scene(
+                *last_top_view,
                 all_events,
                 all_calendars.clone(),
                 strings,
                 tz,
                 *current_stale_since,
-            ));
+            );
         }
     }
 
