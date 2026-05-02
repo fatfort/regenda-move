@@ -144,15 +144,30 @@ pub fn poll_for_token(
     bail!("Unexpected token response ({}): {}", status, body);
 }
 
+/// Outcome of an attempted refresh. We need to distinguish "the server told
+/// us our refresh_token is bad" (the user must re-authorize) from "the request
+/// didn't reach the server at all / something blew up in transit" (transient,
+/// the existing token is still presumably good — caller should fail this
+/// fetch but NOT trigger an OAuth re-prompt).
+pub enum RefreshOutcome {
+    Token(String),
+    /// Google returned `invalid_grant` (or another permanent rejection of the
+    /// refresh_token). Re-auth is required.
+    InvalidGrant,
+    /// Transient: timeout, DNS failure, 5xx, malformed response, etc. The
+    /// refresh_token is presumably still valid; retry next fetch cycle.
+    Transient(anyhow::Error),
+}
+
 /// Refresh an expired access token using the refresh token.
 pub fn refresh_access_token(
     client_id: &str,
     client_secret: &str,
     refresh_token: &str,
-) -> Result<String> {
+) -> RefreshOutcome {
     let client = oauth_client();
 
-    let resp = client
+    let resp = match client
         .post(GOOGLE_TOKEN_URL)
         .form(&[
             ("client_id", client_id),
@@ -161,18 +176,32 @@ pub fn refresh_access_token(
             ("grant_type", "refresh_token"),
         ])
         .send()
-        .context("Failed to refresh token")?;
+    {
+        Ok(r) => r,
+        Err(e) => return RefreshOutcome::Transient(anyhow::Error::new(e)),
+    };
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
         let body = resp.text().unwrap_or_default();
-        bail!("Token refresh failed: {}", body);
+        // Inspect the OAuth error code per RFC 6749 §5.2. invalid_grant means
+        // the refresh_token is no longer valid (revoked, expired, scope
+        // narrowed) — the user must re-auth. Any other 4xx/5xx is treated as
+        // transient (rate limits, server errors, scope-mismatch quirks).
+        if body.contains("\"invalid_grant\"") || body.contains("'invalid_grant'") {
+            return RefreshOutcome::InvalidGrant;
+        }
+        return RefreshOutcome::Transient(anyhow::anyhow!(
+            "Token refresh returned {}: {}",
+            status,
+            body
+        ));
     }
 
-    let token: TokenResponse = resp
-        .json()
-        .context("Failed to parse refresh response")?;
-
-    Ok(token.access_token)
+    match resp.json::<TokenResponse>() {
+        Ok(token) => RefreshOutcome::Token(token.access_token),
+        Err(e) => RefreshOutcome::Transient(anyhow::Error::new(e)),
+    }
 }
 
 /// Get the token file path for a given server name.
@@ -213,36 +242,41 @@ pub fn get_access_token(
     client_secret: &str,
 ) -> Result<Option<String>> {
     if let Some(stored) = load_stored_token(server_name) {
-        // We intentionally do NOT delete the stored token on failure — a
-        // transient network error while offline must not force re-auth on
-        // every subsequent run. Google invalidates the refresh_token on its
-        // side if it's truly bad; the next online run will simply repeat the
-        // failure and the user can re-authorize manually.
-        //
-        // On any refresh error, return Ok(None) so the caller treats the
-        // source as pending OAuth. Returning Err would route the source into
-        // the generic error list, where the OAuth scene is unreachable —
-        // even a revoked token wouldn't recover, since the user would never
-        // be re-prompted.
+        // We intentionally do NOT delete the stored token on any failure — a
+        // transient network blip must not force re-auth on every subsequent
+        // run. Google invalidates the refresh_token server-side if it's truly
+        // bad; we detect that via the explicit `invalid_grant` response code
+        // and only then route to the OAuth re-prompt flow.
         match refresh_access_token(client_id, client_secret, &stored.refresh_token) {
-            Ok(access_token) => {
+            RefreshOutcome::Token(access_token) => {
                 let updated = StoredToken {
                     access_token: access_token.clone(),
                     ..stored
                 };
                 save_stored_token(server_name, &updated).ok();
-                return Ok(Some(access_token));
+                Ok(Some(access_token))
             }
-            Err(e) => {
+            RefreshOutcome::InvalidGrant => {
                 log::warn!(
-                    "refresh failed for {}: {:?}; treating as pending OAuth",
+                    "refresh_token for {} rejected as invalid_grant — needs re-auth",
+                    server_name
+                );
+                Ok(None)
+            }
+            RefreshOutcome::Transient(e) => {
+                // Surface as a hard error on this fetch only — fetch_all will
+                // log the source as failed and (with our cache fix) fall back
+                // to last-known-good entries from the on-disk cache. The
+                // refresh_token stays put and will be retried next cycle.
+                log::warn!(
+                    "transient refresh failure for {}: {:?}; will retry",
                     server_name,
                     e
                 );
-                return Ok(None);
+                Err(e.context(format!("transient refresh failure for {}", server_name)))
             }
         }
+    } else {
+        Ok(None)
     }
-
-    Ok(None)
 }
