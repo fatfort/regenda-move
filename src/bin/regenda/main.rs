@@ -223,21 +223,29 @@ fn apply_background_refresh(
         return;
     };
 
-    let Some(day) = current_scene.downcast_mut::<DayScene>() else {
-        return;
-    };
-
-    // Only apply if the snapshot differs from what DayScene is already showing.
-    // Compares `stale_since` (None = fresh) and event count to avoid re-applying
-    // the same snapshot every frame.
-    if day.stale_since == stale_since && day.events_total() == events.len() {
+    if let Some(day) = current_scene.downcast_mut::<DayScene>() {
+        // Only apply if the snapshot differs from what DayScene is already
+        // showing. Compares `stale_since` (None = fresh) and event count to
+        // avoid re-applying the same snapshot every frame.
+        if day.stale_since == stale_since && day.events_total() == events.len() {
+            return;
+        }
+        *all_events = events.clone();
+        *all_calendars = calendars.clone();
+        *current_stale_since = stale_since;
+        day.apply_refresh(events, calendars, stale_since);
         return;
     }
 
-    *all_events = events.clone();
-    *all_calendars = calendars.clone();
-    *current_stale_since = stale_since;
-    day.apply_refresh(events, calendars, stale_since);
+    if let Some(week) = current_scene.downcast_mut::<WeeklyScene>() {
+        if week.stale_since == stale_since && week.events_total() == events.len() {
+            return;
+        }
+        *all_events = events.clone();
+        *all_calendars = calendars.clone();
+        *current_stale_since = stale_since;
+        week.apply_refresh(events, calendars, stale_since);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -342,6 +350,16 @@ fn update(
                 tz,
             ));
         }
+        if day.go_to_week {
+            return Box::new(WeeklyScene::new(
+                day.current_date,
+                all_events,
+                all_calendars.clone(),
+                strings,
+                tz,
+                *current_stale_since,
+            ));
+        }
         if day.go_to_settings {
             return Box::new(SettingsScene::new(
                 all_calendars.clone(),
@@ -417,6 +435,60 @@ fn update(
                 tz,
                 *current_stale_since,
             ));
+        }
+    }
+
+    // Weekly scene transitions
+    if let Some(week) = scene.downcast_ref::<WeeklyScene>() {
+        if let Some(date) = week.go_to_day {
+            return Box::new(DayScene::new(
+                date,
+                all_events,
+                all_calendars.clone(),
+                strings,
+                tz,
+                *current_stale_since,
+            ));
+        }
+        if let Some(idx) = week.go_to_event {
+            if idx < week.events.len() {
+                return Box::new(EventScene::new(
+                    week.events[idx].clone(),
+                    strings,
+                    tz,
+                ));
+            }
+        }
+        if week.go_to_month {
+            return Box::new(MonthScene::new(
+                week.current_week_start,
+                all_events.clone(),
+                strings,
+                tz,
+            ));
+        }
+        if week.go_to_settings {
+            return Box::new(SettingsScene::new(
+                all_calendars.clone(),
+                strings,
+            ));
+        }
+        if week.refresh_pressed {
+            let status_clone = fetch_status.clone();
+            let config_clone = config.clone();
+            *fetch_status.lock().unwrap() = FetchStatus::Loading {
+                message: strings.refreshing.to_string(),
+            };
+            std::thread::spawn(move || {
+                let result = caldav::fetch_all(&config_clone);
+                *status_clone.lock().unwrap() = result;
+            });
+            return Box::new(LoadingScene::new(fetch_status.clone(), strings));
+        }
+        if week.exit_pressed {
+            canvas.clear();
+            canvas.update_full();
+            std::process::exit(0);
         }
     }
 

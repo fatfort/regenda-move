@@ -24,6 +24,7 @@ pub struct DayScene {
     all_events: Vec<Event>,
     pub calendars: Vec<CalendarInfo>,
     pub go_to_month: bool,
+    pub go_to_week: bool,
     pub go_to_settings: bool,
     pub go_to_event: Option<usize>,
     pub refresh_pressed: bool,
@@ -41,6 +42,7 @@ pub struct DayScene {
     next_hitbox: mxcfb_rect,
     today_hitbox: mxcfb_rect,
     month_hitbox: mxcfb_rect,
+    week_hitbox: mxcfb_rect,
     settings_hitbox: mxcfb_rect,
     refresh_hitbox: mxcfb_rect,
     event_hitboxes: Vec<mxcfb_rect>,
@@ -68,6 +70,7 @@ impl DayScene {
             all_events: all_events.to_vec(),
             calendars,
             go_to_month: false,
+            go_to_week: false,
             go_to_settings: false,
             go_to_event: None,
             refresh_pressed: false,
@@ -81,6 +84,7 @@ impl DayScene {
             next_hitbox: mxcfb_rect::default(),
             today_hitbox: mxcfb_rect::default(),
             month_hitbox: mxcfb_rect::default(),
+            week_hitbox: mxcfb_rect::default(),
             settings_hitbox: mxcfb_rect::default(),
             refresh_hitbox: mxcfb_rect::default(),
             event_hitboxes: Vec::new(),
@@ -150,6 +154,8 @@ impl Scene for DayScene {
                 self.needs_redraw = true;
             } else if Canvas::is_hitting(pos, self.month_hitbox) {
                 self.go_to_month = true;
+            } else if Canvas::is_hitting(pos, self.week_hitbox) {
+                self.go_to_week = true;
             } else if Canvas::is_hitting(pos, self.settings_hitbox) {
                 self.go_to_settings = true;
             } else if Canvas::is_hitting(pos, self.refresh_hitbox) {
@@ -557,11 +563,31 @@ impl Scene for DayScene {
             color::LIGHT_GRAY,
         );
 
+        let half = dw / 2;
+
+        let week_text = self.strings.week_view;
+        let wr = canvas.measure_text(week_text, 40.0);
+        canvas.draw_text_colored(
+            Point2 {
+                x: (half as f32 - wr.width as f32) / 2.0,
+                y: (bottom_y + 25) as f32,
+            },
+            week_text,
+            40.0,
+            color::BLACK,
+        );
+        self.week_hitbox = mxcfb_rect {
+            top: bottom_y as u32,
+            left: 0,
+            width: half,
+            height: BOTTOM_HEIGHT,
+        };
+
         let month_text = self.strings.month_view;
         let mr = canvas.measure_text(month_text, 40.0);
         canvas.draw_text_colored(
             Point2 {
-                x: (dw as f32 - mr.width as f32) / 2.0,
+                x: half as f32 + (half as f32 - mr.width as f32) / 2.0,
                 y: (bottom_y + 25) as f32,
             },
             month_text,
@@ -570,10 +596,23 @@ impl Scene for DayScene {
         );
         self.month_hitbox = mxcfb_rect {
             top: bottom_y as u32,
-            left: 0,
-            width: dw,
+            left: half,
+            width: half,
             height: BOTTOM_HEIGHT,
         };
+
+        // Vertical divider between the two bottom buttons
+        canvas.fill_rect(
+            Point2 {
+                x: Some(half as i32),
+                y: Some(bottom_y),
+            },
+            Vector2 {
+                x: 1,
+                y: BOTTOM_HEIGHT,
+            },
+            color::LIGHT_GRAY,
+        );
 
         canvas.update_full();
     }
